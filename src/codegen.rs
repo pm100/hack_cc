@@ -25,8 +25,9 @@
 pub const HACK_OUTPUT_PORT: usize = 32767;
 
 /// Base RAM address of the 8×8 font table (96 chars × 8 rows = 768 words).
-/// Located above screen (16384-24575) and keyboard (24576) areas.
-pub const FONT_BASE: usize = 25000;
+/// Placed at the top of general-purpose RAM, just below screen memory (16384).
+/// 15616 + 768 = 16384 (screen base). Valid Hack RAM is 0-16383; screen is 16384-24575.
+pub const FONT_BASE: usize = 15616;
 
 /// 8×8 bitmap font for ASCII 32-127.
 /// Each entry is 8 bytes, one per screen row, MSB = leftmost pixel
