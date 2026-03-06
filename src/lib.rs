@@ -3,6 +3,8 @@ pub mod parser;
 pub mod sema;
 pub mod codegen;
 
+pub use codegen::FONT_BASE;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]

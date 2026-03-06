@@ -20,6 +20,7 @@ impl ParseError {
 pub enum Type {
     Void,
     Int,
+    Char,
     Ptr(Box<Type>),
     Array(Box<Type>, usize),
 }
@@ -29,7 +30,7 @@ impl Type {
     pub fn size(&self) -> usize {
         match self {
             Type::Void => 0,
-            Type::Int => 1,
+            Type::Int | Type::Char => 1,
             Type::Ptr(_) => 1,
             Type::Array(base, n) => base.size() * n,
         }
@@ -50,6 +51,7 @@ pub enum UnOp { Neg, Not, BitNot, Addr, Deref }
 #[derive(Debug, Clone)]
 pub enum Expr {
     Num(i32),
+    StringLit(String),
     Ident(String),
     BinOp(BinOp, Box<Expr>, Box<Expr>),
     UnOp(UnOp, Box<Expr>),
@@ -155,6 +157,7 @@ impl Parser {
         let pos = self.cur_pos();
         match self.peek().clone() {
             TokenKind::KwInt  => { self.advance(); Ok(Type::Int) }
+            TokenKind::KwChar => { self.advance(); Ok(Type::Char) }
             TokenKind::KwVoid => { self.advance(); Ok(Type::Void) }
             got => Err(ParseError::new(pos, format!("expected type, got {:?}", got))),
         }
@@ -325,7 +328,7 @@ impl Parser {
     }
 
     fn is_type_start(&self) -> bool {
-        matches!(self.peek(), TokenKind::KwInt | TokenKind::KwVoid)
+        matches!(self.peek(), TokenKind::KwInt | TokenKind::KwVoid | TokenKind::KwChar)
     }
 
     fn parse_decl_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -510,6 +513,8 @@ impl Parser {
         let pos = self.cur_pos();
         match self.peek().clone() {
             TokenKind::Number(n) => { self.advance(); Ok(Expr::Num(n)) }
+            TokenKind::CharLit(c) => { self.advance(); Ok(Expr::Num(c as i32)) }
+            TokenKind::StringLit(s) => { self.advance(); Ok(Expr::StringLit(s)) }
             TokenKind::Ident(name) => {
                 self.advance();
                 // function call?

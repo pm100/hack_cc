@@ -17,9 +17,12 @@ impl LexError {
 pub enum TokenKind {
     // Literals
     Number(i32),
+    CharLit(i16),
+    StringLit(String),
     Ident(String),
     // Keywords
     KwInt,
+    KwChar,
     KwVoid,
     KwReturn,
     KwIf,
@@ -125,6 +128,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 let word = &source[start..pos];
                 let kind = match word {
                     "int"    => TokenKind::KwInt,
+                    "char"   => TokenKind::KwChar,
                     "void"   => TokenKind::KwVoid,
                     "return" => TokenKind::KwReturn,
                     "if"     => TokenKind::KwIf,
@@ -135,6 +139,32 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     _        => TokenKind::Ident(word.to_string()),
                 };
                 tokens.push(Token { kind, pos: start });
+                continue;
+            }
+            b'\'' => {
+                pos += 1;
+                let ch = lex_char_escape(bytes, &mut pos)
+                    .map_err(|e| LexError::new(start, e))?;
+                if pos >= bytes.len() || bytes[pos] != b'\'' {
+                    return Err(LexError::new(start, "unterminated char literal"));
+                }
+                pos += 1;
+                tokens.push(Token { kind: TokenKind::CharLit(ch), pos: start });
+                continue;
+            }
+            b'"' => {
+                pos += 1;
+                let mut s = String::new();
+                loop {
+                    if pos >= bytes.len() {
+                        return Err(LexError::new(start, "unterminated string literal"));
+                    }
+                    if bytes[pos] == b'"' { pos += 1; break; }
+                    let ch = lex_char_escape(bytes, &mut pos)
+                        .map_err(|e| LexError::new(start, e))?;
+                    s.push(ch as u8 as char);
+                }
+                tokens.push(Token { kind: TokenKind::StringLit(s), pos: start });
                 continue;
             }
             b'(' => { pos += 1; TokenKind::LParen }
@@ -198,4 +228,39 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     }
     tokens.push(Token { kind: TokenKind::Eof, pos });
     Ok(tokens)
+}
+
+/// Parse one character value from `bytes[*pos]`, advancing `*pos`.
+/// Handles backslash escape sequences. Returns the character as i16.
+/// On error returns a string message (caller wraps in LexError).
+fn lex_char_escape(bytes: &[u8], pos: &mut usize) -> Result<i16, String> {
+    if *pos >= bytes.len() {
+        return Err("unexpected end of input in char/string literal".into());
+    }
+    if bytes[*pos] != b'\\' {
+        let c = bytes[*pos] as i16;
+        *pos += 1;
+        return Ok(c);
+    }
+    // escape sequence
+    *pos += 1;
+    if *pos >= bytes.len() {
+        return Err("unexpected end of input after '\\'".into());
+    }
+    let esc = bytes[*pos];
+    *pos += 1;
+    Ok(match esc {
+        b'n'  => 10,
+        b't'  => 9,
+        b'r'  => 13,
+        b'0'  => 0,
+        b'\\'  => 92,
+        b'\'' => 39,
+        b'"'  => 34,
+        b'a'  => 7,
+        b'b'  => 8,
+        b'f'  => 12,
+        b'v'  => 11,
+        c => return Err(format!("unknown escape sequence '\\{}'", c as char)),
+    })
 }

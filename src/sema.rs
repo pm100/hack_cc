@@ -41,6 +41,10 @@ pub struct SemaResult {
     pub globals: Vec<(String, usize, Type, Option<i32>)>, // name, addr, ty, init
     pub funcs: Vec<AnnotatedFunc>,
     pub func_sigs: HashMap<String, (Type, usize)>, // name -> (ret_ty, n_params)
+    /// RAM address and char values (without null terminator) for each string literal.
+    pub string_literals: Vec<(usize, Vec<i16>)>,
+    /// Map from string content to its RAM address (for codegen lookup).
+    pub string_map: HashMap<String, usize>,
 }
 
 pub fn analyze(prog: Program) -> Result<SemaResult, SemaError> {
@@ -64,6 +68,20 @@ pub fn analyze(prog: Program) -> Result<SemaResult, SemaError> {
         globals_out.push((name.clone(), addr, ty.clone(), init_val));
     }
 
+    // Collect string literals from all function bodies (and global inits)
+    let mut string_map: HashMap<String, usize> = HashMap::new();
+    let mut string_literals: Vec<(usize, Vec<i16>)> = Vec::new();
+    for (_, _, init_expr) in &prog.globals {
+        if let Some(e) = init_expr {
+            collect_strings_expr(e, &mut string_map, &mut string_literals, &mut next_global_addr);
+        }
+    }
+    for f in &prog.funcs {
+        for stmt in &f.body {
+            collect_strings_stmt(stmt, &mut string_map, &mut string_literals, &mut next_global_addr);
+        }
+    }
+
     // Build function signature table
     let mut func_sigs: HashMap<String, (Type, usize)> = HashMap::new();
     for f in &prog.funcs {
@@ -77,13 +95,14 @@ pub fn analyze(prog: Program) -> Result<SemaResult, SemaError> {
         funcs_out.push(af);
     }
 
-    Ok(SemaResult { globals: globals_out, funcs: funcs_out, func_sigs })
+    Ok(SemaResult { globals: globals_out, funcs: funcs_out, func_sigs, string_literals, string_map })
 }
 
 fn eval_const(expr: &Expr) -> Result<i32, SemaError> {
     match expr {
         Expr::Num(n) => Ok(*n),
         Expr::UnOp(crate::parser::UnOp::Neg, e) => Ok(-eval_const(e)?),
+        Expr::StringLit(_) => Err(SemaError::new("string literal cannot be used as integer constant initializer")),
         _ => Err(SemaError::new("global initializer must be a constant integer")),
     }
 }
@@ -187,3 +206,77 @@ pub fn desugar_compound(op: &BinOp, lhs: Expr, rhs: Expr) -> Expr {
         Box::new(Expr::BinOp(arith_op, Box::new(lhs), Box::new(rhs))),
     )
 }
+
+// ── String literal collection ────────────────────────────────────────────────
+
+fn intern_string(
+    s: &str,
+    map: &mut HashMap<String, usize>,
+    lits: &mut Vec<(usize, Vec<i16>)>,
+    next_addr: &mut usize,
+) {
+    if !map.contains_key(s) {
+        let addr = *next_addr;
+        let chars: Vec<i16> = s.bytes().map(|b| b as i16).collect();
+        *next_addr += chars.len() + 1; // +1 for null terminator slot
+        map.insert(s.to_string(), addr);
+        lits.push((addr, chars));
+    }
+}
+
+fn collect_strings_expr(
+    expr: &Expr,
+    map: &mut HashMap<String, usize>,
+    lits: &mut Vec<(usize, Vec<i16>)>,
+    next_addr: &mut usize,
+) {
+    match expr {
+        Expr::StringLit(s) => intern_string(s, map, lits, next_addr),
+        Expr::BinOp(_, l, r) => {
+            collect_strings_expr(l, map, lits, next_addr);
+            collect_strings_expr(r, map, lits, next_addr);
+        }
+        Expr::UnOp(_, e) => collect_strings_expr(e, map, lits, next_addr),
+        Expr::Call(_, args) => {
+            for a in args { collect_strings_expr(a, map, lits, next_addr); }
+        }
+        Expr::Index(a, b) => {
+            collect_strings_expr(a, map, lits, next_addr);
+            collect_strings_expr(b, map, lits, next_addr);
+        }
+        Expr::Num(_) | Expr::Ident(_) | Expr::Sizeof(_) => {}
+    }
+}
+
+fn collect_strings_stmt(
+    stmt: &Stmt,
+    map: &mut HashMap<String, usize>,
+    lits: &mut Vec<(usize, Vec<i16>)>,
+    next_addr: &mut usize,
+) {
+    match stmt {
+        Stmt::Expr(e) => collect_strings_expr(e, map, lits, next_addr),
+        Stmt::Return(Some(e)) => collect_strings_expr(e, map, lits, next_addr),
+        Stmt::Decl(_, _, Some(e)) => collect_strings_expr(e, map, lits, next_addr),
+        Stmt::Block(stmts) => {
+            for s in stmts { collect_strings_stmt(s, map, lits, next_addr); }
+        }
+        Stmt::If(cond, then, els) => {
+            collect_strings_expr(cond, map, lits, next_addr);
+            collect_strings_stmt(then, map, lits, next_addr);
+            if let Some(e) = els { collect_strings_stmt(e, map, lits, next_addr); }
+        }
+        Stmt::While(cond, body) => {
+            collect_strings_expr(cond, map, lits, next_addr);
+            collect_strings_stmt(body, map, lits, next_addr);
+        }
+        Stmt::For { init, cond, incr, body } => {
+            if let Some(s) = init { collect_strings_stmt(s, map, lits, next_addr); }
+            if let Some(e) = cond { collect_strings_expr(e, map, lits, next_addr); }
+            if let Some(e) = incr { collect_strings_expr(e, map, lits, next_addr); }
+            collect_strings_stmt(body, map, lits, next_addr);
+        }
+        _ => {}
+    }
+}
+
