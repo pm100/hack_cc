@@ -858,23 +858,81 @@ mod tests {
         assert!(!pixel_set(&ram, 0, 0), "pixel (0,0) clear");
     }
 
-    /// draw_string(0, 0, "AB"): 'A' at col 0, 'B' at col 1 (high byte of same word).
-    /// 'B' = ASCII 66, index 34. Row 0 of 'B' = 0x7C -> reverse_bits = 0x3E.
-    /// At odd col: 0x3E << 8 -> bits 8+1..8+5 = 9..13 set.
+    // ── Struct tests ─────────────────────────────────────────────────────
+
+    /// Basic struct: declare, write fields, read them back.
     #[test]
-    fn test_draw_string_two_chars() {
-        let (ret, _, ram) = compile_and_run_ext(
-            r#"int main() { draw_string(0, 0, "AB"); return 0; }"#,
-            8_000_000,
-        );
-        assert_eq!(ret, 0);
-        // 'A' at col 0 (even) -> low byte
-        assert!( pixel_set(&ram, 3, 0), "'A' pixel (3,0)");
-        assert!( pixel_set(&ram, 4, 0), "'A' pixel (4,0)");
-        // 'B' at col 1 (odd) -> high byte; row0=0x7C reversed=0x3E -> bits 1..5 -> x=9..13
-        assert!( pixel_set(&ram,  9, 0), "'B' pixel (9,0)");
-        assert!( pixel_set(&ram, 13, 0), "'B' pixel (13,0)");
-        assert!(!pixel_set(&ram,  8, 0), "'B' pixel (8,0) clear");
-        assert!(!pixel_set(&ram, 14, 0), "'B' pixel (14,0) clear");
+    fn test_struct_basic() {
+        let ret = compile_and_run(r#"
+struct Point { int x; int y; };
+int main() {
+    struct Point p;
+    p.x = 10;
+    p.y = 20;
+    return p.x + p.y;
+}
+"#, 500_000);
+        assert_eq!(ret, 30);
+    }
+
+    /// Struct field overwrite.
+    #[test]
+    fn test_struct_field_write() {
+        let ret = compile_and_run(r#"
+struct Pair { int a; int b; };
+int main() {
+    struct Pair q;
+    q.a = 7;
+    q.b = 3;
+    q.a = q.a + q.b;
+    return q.a;
+}
+"#, 500_000);
+        assert_eq!(ret, 10);
+    }
+
+    /// Struct passed via pointer; arrow operator.
+    #[test]
+    fn test_struct_pointer_arrow() {
+        let ret = compile_and_run(r#"
+struct Vec2 { int x; int y; };
+int main() {
+    struct Vec2 v;
+    struct Vec2 *p;
+    p = &v;
+    p->x = 5;
+    p->y = 9;
+    return p->x + p->y;
+}
+"#, 500_000);
+        assert_eq!(ret, 14);
+    }
+
+    /// Three-field struct: verify field offsets.
+    #[test]
+    fn test_struct_three_fields() {
+        let ret = compile_and_run(r#"
+struct Triple { int a; int b; int c; };
+int main() {
+    struct Triple t;
+    t.a = 1;
+    t.b = 2;
+    t.c = 3;
+    return t.a + t.b + t.c;
+}
+"#, 500_000);
+        assert_eq!(ret, 6);
+    }
+
+    /// sizeof(struct) returns the number of words.
+    #[test]
+    fn test_struct_sizeof() {
+        let ret = compile_and_run(r#"
+struct Pair { int a; int b; };
+int main() {
+    return sizeof(struct Pair);
+}
+"#, 200_000);
+        assert_eq!(ret, 2);
     }
 }

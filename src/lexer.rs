@@ -30,6 +30,7 @@ pub enum TokenKind {
     KwWhile,
     KwFor,
     KwSizeof,
+    KwStruct,
     // Punctuation
     LParen,
     RParen,
@@ -63,6 +64,7 @@ pub enum TokenKind {
     PlusPlus,
     MinusMinus,
     Arrow,
+    Dot,
     // End
     Eof,
 }
@@ -136,6 +138,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     "while"  => TokenKind::KwWhile,
                     "for"    => TokenKind::KwFor,
                     "sizeof" => TokenKind::KwSizeof,
+                    "struct" => TokenKind::KwStruct,
                     _        => TokenKind::Ident(word.to_string()),
                 };
                 tokens.push(Token { kind, pos: start });
@@ -175,6 +178,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             b']' => { pos += 1; TokenKind::RBracket }
             b';' => { pos += 1; TokenKind::Semicolon }
             b',' => { pos += 1; TokenKind::Comma }
+            b'.' => { pos += 1; TokenKind::Dot }
             b'~' => { pos += 1; TokenKind::Tilde }
             b'+' => {
                 pos += 1;

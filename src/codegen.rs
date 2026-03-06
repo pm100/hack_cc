@@ -134,7 +134,7 @@ const FONT_8X8: [[u8; 8]; 96] = [
 
 use std::collections::HashMap;
 use thiserror::Error;
-use crate::sema::{SemaResult, AnnotatedFunc, VarInfo, VarStorage};
+use crate::sema::{SemaResult, AnnotatedFunc, VarInfo, VarStorage, type_size};
 use crate::parser::{Expr, Stmt, BinOp, UnOp, Type};
 
 #[derive(Debug, Error)]
@@ -149,11 +149,16 @@ struct Gen {
     out: Vec<String>,
     label_id: usize,
     string_map: HashMap<String, usize>,
+    struct_defs: HashMap<String, Vec<(String, Type)>>,
 }
 
 impl Gen {
-    fn new(_func_sigs: HashMap<String, (Type, usize)>, string_map: HashMap<String, usize>) -> Self {
-        Self { out: Vec::new(), label_id: 0, string_map }
+    fn new(
+        _func_sigs: HashMap<String, (Type, usize)>,
+        string_map: HashMap<String, usize>,
+        struct_defs: HashMap<String, Vec<(String, Type)>>,
+    ) -> Self {
+        Self { out: Vec::new(), label_id: 0, string_map, struct_defs }
     }
 
     fn emit(&mut self, s: impl Into<String>) {
@@ -272,6 +277,61 @@ impl Gen {
         }
     }
 
+    // ── Struct helpers ───────────────────────────────────────────────────
+
+    /// Compute the size (in Hack words) of a type, resolving structs via self.struct_defs.
+    fn type_size(&self, ty: &Type) -> usize {
+        type_size(ty, &self.struct_defs)
+    }
+
+    /// Compute the byte offset of a named field within a named struct.
+    fn field_offset(&self, struct_name: &str, field_name: &str) -> Result<usize, CodegenError> {
+        let fields = self.struct_defs.get(struct_name).ok_or_else(|| {
+            CodegenError::new(format!("unknown struct '{}'", struct_name))
+        })?;
+        let mut offset = 0usize;
+        for (fname, fty) in fields {
+            if fname == field_name {
+                return Ok(offset);
+            }
+            offset += self.type_size(fty);
+        }
+        Err(CodegenError::new(format!("struct '{}' has no field '{}'", struct_name, field_name)))
+    }
+
+    /// Infer the type of an expression without generating code.
+    fn expr_type(&self, expr: &Expr, vars: &HashMap<String, VarInfo>) -> Option<Type> {
+        match expr {
+            Expr::Num(_) => Some(Type::Int),
+            Expr::StringLit(_) => Some(Type::Ptr(Box::new(Type::Char))),
+            Expr::Sizeof(_) => Some(Type::Int),
+            Expr::Ident(name) => vars.get(name).map(|v| v.ty.clone()),
+            Expr::UnOp(UnOp::Deref, inner) => match self.expr_type(inner, vars)? {
+                Type::Ptr(t) => Some(*t),
+                Type::Array(t, _) => Some(*t),
+                _ => None,
+            },
+            Expr::UnOp(UnOp::Addr, inner) => {
+                self.expr_type(inner, vars).map(|t| Type::Ptr(Box::new(t)))
+            }
+            Expr::Member(base, field) => {
+                if let Some(Type::Struct(sname)) = self.expr_type(base, vars) {
+                    self.struct_defs.get(&sname)
+                        .and_then(|fields| fields.iter().find(|(fn_, _)| fn_ == field))
+                        .map(|(_, ty)| ty.clone())
+                } else {
+                    None
+                }
+            }
+            Expr::Index(base, _) => match self.expr_type(base, vars)? {
+                Type::Ptr(t) => Some(*t),
+                Type::Array(t, _) => Some(*t),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     // ── Expression codegen ───────────────────────────────────────────────
 
     /// Compile expr; leaves one value on top of stack.
@@ -301,7 +361,7 @@ impl Gen {
             }
 
             Expr::Sizeof(ty) => {
-                let sz = ty.size().max(1) as i32;
+                let sz = self.type_size(ty).max(1) as i32;
                 self.emit(&format!("@{}", sz));
                 self.emit("D=A");
                 self.push_d();
@@ -393,6 +453,15 @@ impl Gen {
                 self.emit("D=M");         // D = RAM[base+idx]
                 self.push_d();
             }
+
+            Expr::Member(_, _) => {
+                // Load value at field address: gen_addr gives the address, then deref
+                self.gen_addr(expr, vars)?;
+                self.pop_d();
+                self.emit("A=D");
+                self.emit("D=M");
+                self.push_d();
+            }
         }
         Ok(())
     }
@@ -428,6 +497,25 @@ impl Gen {
                 self.emit("@R14");
                 self.emit("D=D+M");
                 self.push_d();
+            }
+            Expr::Member(base, field) => {
+                // &(expr.field) = &base + field_offset
+                let base_ty = self.expr_type(base, vars)
+                    .ok_or_else(|| CodegenError::new("cannot determine type for member access"))?;
+                let struct_name = match &base_ty {
+                    Type::Struct(name) => name.clone(),
+                    _ => return Err(CodegenError::new(
+                        format!("member access on non-struct type {:?}", base_ty)
+                    )),
+                };
+                let offset = self.field_offset(&struct_name, field)?;
+                self.gen_addr(base, vars)?; // pushes address of base (struct start)
+                if offset > 0 {
+                    self.pop_d();
+                    self.emit(&format!("@{}", offset));
+                    self.emit("D=D+A");
+                    self.push_d();
+                }
             }
             _ => return Err(CodegenError::new(format!("not an lvalue: {:?}", expr))),
         }
@@ -723,9 +811,12 @@ impl Gen {
                 // compute pointer value, then store through it
                 self.gen_expr(ptr_expr, vars)?;
                 self.pop_d();          // D = pointer address
-                self.emit("A=D");
+                self.emit("@R14");
+                self.emit("M=D");      // R14 = target address (@R13 would overwrite A)
                 self.emit("@R13");
-                self.emit("D=M");
+                self.emit("D=M");      // D = value
+                self.emit("@R14");
+                self.emit("A=M");      // A = target address
                 self.emit("M=D");
             }
             Expr::Index(base, idx) => {
@@ -738,10 +829,38 @@ impl Gen {
                 self.pop_d();           // D = base
                 self.emit("@R14");
                 self.emit("D=D+M");     // D = base + idx (address)
-                self.emit("A=D");
+                self.emit("@R14");
+                self.emit("M=D");       // R14 = address (save before @R13 overwrites A)
                 self.emit("@R13");
-                self.emit("D=M");
+                self.emit("D=M");       // D = value
+                self.emit("@R14");
+                self.emit("A=M");       // A = address
                 self.emit("M=D");
+            }
+            Expr::Member(base, field) => {
+                // Compute field address via gen_addr, then store R13 there
+                let base_ty = self.expr_type(base, vars)
+                    .ok_or_else(|| CodegenError::new("cannot determine type for member assignment"))?;
+                let struct_name = match &base_ty {
+                    Type::Struct(name) => name.clone(),
+                    _ => return Err(CodegenError::new(
+                        format!("member access on non-struct type {:?}", base_ty)
+                    )),
+                };
+                let offset = self.field_offset(&struct_name, field)?;
+                self.gen_addr(base, vars)?; // pushes base address
+                self.pop_d();               // D = base address
+                if offset > 0 {
+                    self.emit(&format!("@{}", offset));
+                    self.emit("D=D+A");     // D = field address
+                }
+                self.emit("@R14");
+                self.emit("M=D");           // R14 = field address (save before @R13 overwrites A)
+                self.emit("@R13");
+                self.emit("D=M");           // D = value
+                self.emit("@R14");
+                self.emit("A=M");           // A = field address
+                self.emit("M=D");           // store
             }
             _ => return Err(CodegenError::new(format!("not a valid lvalue: {:?}", lhs))),
         }
@@ -1663,7 +1782,7 @@ impl Gen {
 }
 
 pub fn generate(sema: SemaResult) -> Result<String, CodegenError> {
-    let mut g = Gen::new(sema.func_sigs.clone(), sema.string_map.clone());
+    let mut g = Gen::new(sema.func_sigs.clone(), sema.string_map.clone(), sema.struct_defs.clone());
 
     // Bootstrap
     g.emit("// Bootstrap");

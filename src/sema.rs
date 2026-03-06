@@ -45,9 +45,34 @@ pub struct SemaResult {
     pub string_literals: Vec<(usize, Vec<i16>)>,
     /// Map from string content to its RAM address (for codegen lookup).
     pub string_map: HashMap<String, usize>,
+    /// Struct definitions: name -> ordered list of (field_name, field_type).
+    pub struct_defs: HashMap<String, Vec<(String, Type)>>,
+}
+
+/// Compute the size in Hack words of a type, resolving struct sizes via struct_defs.
+pub fn type_size(ty: &Type, defs: &HashMap<String, Vec<(String, Type)>>) -> usize {
+    match ty {
+        Type::Void => 0,
+        Type::Int | Type::Char | Type::Ptr(_) => 1,
+        Type::Array(base, n) => type_size(base, defs) * n,
+        Type::Struct(name) => {
+            defs.get(name)
+                .map(|fields| fields.iter().map(|(_, t)| type_size(t, defs)).sum())
+                .unwrap_or(1) // unknown struct — treat as 1 to avoid 0-size locals
+        }
+    }
 }
 
 pub fn analyze(prog: Program) -> Result<SemaResult, SemaError> {
+    // Build struct definition map: name -> [(field_name, field_type)]
+    let mut struct_defs: HashMap<String, Vec<(String, Type)>> = HashMap::new();
+    for sd in &prog.struct_defs {
+        let fields: Vec<(String, Type)> = sd.fields.iter()
+            .map(|(ty, name)| (name.clone(), ty.clone()))
+            .collect();
+        struct_defs.insert(sd.name.clone(), fields);
+    }
+
     // Assign global variable addresses starting at RAM[16]
     let mut next_global_addr = 16usize;
     let mut global_map: HashMap<String, VarInfo> = HashMap::new();
@@ -55,7 +80,7 @@ pub fn analyze(prog: Program) -> Result<SemaResult, SemaError> {
 
     for (ty, name, init_expr) in &prog.globals {
         let addr = next_global_addr;
-        let size = ty.size().max(1);
+        let size = type_size(ty, &struct_defs).max(1);
         next_global_addr += size;
         let init_val = match init_expr {
             Some(e) => Some(eval_const(e)?),
@@ -91,11 +116,11 @@ pub fn analyze(prog: Program) -> Result<SemaResult, SemaError> {
     // Analyze each function
     let mut funcs_out = Vec::new();
     for f in prog.funcs {
-        let af = analyze_func(f, &global_map)?;
+        let af = analyze_func(f, &global_map, &struct_defs)?;
         funcs_out.push(af);
     }
 
-    Ok(SemaResult { globals: globals_out, funcs: funcs_out, func_sigs, string_literals, string_map })
+    Ok(SemaResult { globals: globals_out, funcs: funcs_out, func_sigs, string_literals, string_map, struct_defs })
 }
 
 fn eval_const(expr: &Expr) -> Result<i32, SemaError> {
@@ -110,6 +135,7 @@ fn eval_const(expr: &Expr) -> Result<i32, SemaError> {
 fn analyze_func(
     f: FuncDef,
     globals: &HashMap<String, VarInfo>,
+    struct_defs: &HashMap<String, Vec<(String, Type)>>,
 ) -> Result<AnnotatedFunc, SemaError> {
     let mut vars: HashMap<String, VarInfo> = HashMap::new();
 
@@ -123,7 +149,7 @@ fn analyze_func(
 
     // Collect locals from body
     let mut local_idx = 0usize;
-    collect_locals(&f.body, &mut vars, &mut local_idx)?;
+    collect_locals(&f.body, &mut vars, &mut local_idx, struct_defs)?;
 
     // Merge globals (lower priority)
     for (name, info) in globals {
@@ -144,9 +170,10 @@ fn collect_locals(
     stmts: &[Stmt],
     vars: &mut HashMap<String, VarInfo>,
     next_idx: &mut usize,
+    struct_defs: &HashMap<String, Vec<(String, Type)>>,
 ) -> Result<(), SemaError> {
     for stmt in stmts {
-        collect_locals_stmt(stmt, vars, next_idx)?;
+        collect_locals_stmt(stmt, vars, next_idx, struct_defs)?;
     }
     Ok(())
 }
@@ -155,10 +182,11 @@ fn collect_locals_stmt(
     stmt: &Stmt,
     vars: &mut HashMap<String, VarInfo>,
     next_idx: &mut usize,
+    struct_defs: &HashMap<String, Vec<(String, Type)>>,
 ) -> Result<(), SemaError> {
     match stmt {
         Stmt::Decl(ty, name, _) => {
-            let size = ty.size().max(1);
+            let size = type_size(ty, struct_defs).max(1);
             let idx = *next_idx;
             *next_idx += size;
             vars.insert(name.clone(), VarInfo {
@@ -166,15 +194,15 @@ fn collect_locals_stmt(
                 storage: VarStorage::Local(idx),
             });
         }
-        Stmt::Block(stmts) => collect_locals(stmts, vars, next_idx)?,
+        Stmt::Block(stmts) => collect_locals(stmts, vars, next_idx, struct_defs)?,
         Stmt::If(_, then, els) => {
-            collect_locals_stmt(then, vars, next_idx)?;
-            if let Some(e) = els { collect_locals_stmt(e, vars, next_idx)?; }
+            collect_locals_stmt(then, vars, next_idx, struct_defs)?;
+            if let Some(e) = els { collect_locals_stmt(e, vars, next_idx, struct_defs)?; }
         }
-        Stmt::While(_, body) => collect_locals_stmt(body, vars, next_idx)?,
+        Stmt::While(_, body) => collect_locals_stmt(body, vars, next_idx, struct_defs)?,
         Stmt::For { init, body, .. } => {
-            if let Some(s) = init { collect_locals_stmt(s, vars, next_idx)?; }
-            collect_locals_stmt(body, vars, next_idx)?;
+            if let Some(s) = init { collect_locals_stmt(s, vars, next_idx, struct_defs)?; }
+            collect_locals_stmt(body, vars, next_idx, struct_defs)?;
         }
         Stmt::Return(_) | Stmt::Expr(_) => {}
     }
@@ -189,6 +217,7 @@ pub fn lvalue_ok(expr: &Expr) -> bool {
         Expr::Ident(_) => true,
         Expr::UnOp(crate::parser::UnOp::Deref, _) => true,
         Expr::Index(_, _) => true,
+        Expr::Member(_, _) => true,
         _ => false,
     }
 }
@@ -244,6 +273,7 @@ fn collect_strings_expr(
             collect_strings_expr(a, map, lits, next_addr);
             collect_strings_expr(b, map, lits, next_addr);
         }
+        Expr::Member(base, _) => collect_strings_expr(base, map, lits, next_addr),
         Expr::Num(_) | Expr::Ident(_) | Expr::Sizeof(_) => {}
     }
 }

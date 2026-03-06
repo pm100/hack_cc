@@ -16,6 +16,12 @@ impl ParseError {
 
 // ── AST types ────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone)]
+pub struct StructDef {
+    pub name: String,
+    pub fields: Vec<(Type, String)>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Void,
@@ -23,16 +29,19 @@ pub enum Type {
     Char,
     Ptr(Box<Type>),
     Array(Box<Type>, usize),
+    Struct(String),
 }
 
 impl Type {
-    /// Size in Hack words (16-bit cells)
+    /// Size in Hack words for non-struct types.
+    /// For Struct, returns 0 — use sema::type_size with struct_defs for proper size.
     pub fn size(&self) -> usize {
         match self {
             Type::Void => 0,
             Type::Int | Type::Char => 1,
             Type::Ptr(_) => 1,
             Type::Array(base, n) => base.size() * n,
+            Type::Struct(_) => 0,
         }
     }
 }
@@ -58,6 +67,7 @@ pub enum Expr {
     Call(String, Vec<Expr>),
     Index(Box<Expr>, Box<Expr>),
     Sizeof(Type),
+    Member(Box<Expr>, String), // expr.field (also used for expr->field after desugaring)
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +96,7 @@ pub struct FuncDef {
 
 #[derive(Debug, Clone)]
 pub struct Program {
+    pub struct_defs: Vec<StructDef>,
     pub globals: Vec<(Type, String, Option<Expr>)>,
     pub funcs: Vec<FuncDef>,
 }
@@ -95,11 +106,12 @@ pub struct Program {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    struct_defs: Vec<StructDef>,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self { tokens, pos: 0, struct_defs: Vec::new() }
     }
 
     fn cur(&self) -> &Token {
@@ -112,6 +124,11 @@ impl Parser {
 
     fn peek(&self) -> &TokenKind {
         &self.cur().kind
+    }
+
+    fn peek_at(&self, offset: usize) -> &TokenKind {
+        let idx = (self.pos + offset).min(self.tokens.len() - 1);
+        &self.tokens[idx].kind
     }
 
     fn advance(&mut self) -> &Token {
@@ -159,6 +176,11 @@ impl Parser {
             TokenKind::KwInt  => { self.advance(); Ok(Type::Int) }
             TokenKind::KwChar => { self.advance(); Ok(Type::Char) }
             TokenKind::KwVoid => { self.advance(); Ok(Type::Void) }
+            TokenKind::KwStruct => {
+                self.advance();
+                let name = self.expect_ident()?;
+                Ok(Type::Struct(name))
+            }
             got => Err(ParseError::new(pos, format!("expected type, got {:?}", got))),
         }
     }
@@ -201,6 +223,15 @@ impl Parser {
         let mut funcs = Vec::new();
 
         while *self.peek() != TokenKind::Eof {
+            // Standalone struct definition: struct Name { ... };
+            if *self.peek() == TokenKind::KwStruct
+                && matches!(self.peek_at(1), TokenKind::Ident(_))
+                && *self.peek_at(2) == TokenKind::LBrace
+            {
+                self.parse_struct_def()?;
+                continue;
+            }
+
             // peek ahead to determine if function or global
             // Pattern: type name '(' => function
             let (ty, name) = self.parse_typed_decl()?;
@@ -219,7 +250,25 @@ impl Parser {
                 globals.push((ty, name, init));
             }
         }
-        Ok(Program { globals, funcs })
+        let struct_defs = std::mem::take(&mut self.struct_defs);
+        Ok(Program { struct_defs, globals, funcs })
+    }
+
+    /// Parse `struct Name { field; field; }` — stores into self.struct_defs.
+    fn parse_struct_def(&mut self) -> Result<(), ParseError> {
+        self.expect(&TokenKind::KwStruct)?;
+        let name = self.expect_ident()?;
+        self.expect(&TokenKind::LBrace)?;
+        let mut fields = Vec::new();
+        while *self.peek() != TokenKind::RBrace && *self.peek() != TokenKind::Eof {
+            let (ty, fname) = self.parse_typed_decl()?;
+            self.expect(&TokenKind::Semicolon)?;
+            fields.push((ty, fname));
+        }
+        self.expect(&TokenKind::RBrace)?;
+        self.expect(&TokenKind::Semicolon)?;
+        self.struct_defs.push(StructDef { name, fields });
+        Ok(())
     }
 
     fn parse_func_rest(&mut self, ret_ty: Type, name: String) -> Result<FuncDef, ParseError> {
@@ -328,7 +377,7 @@ impl Parser {
     }
 
     fn is_type_start(&self) -> bool {
-        matches!(self.peek(), TokenKind::KwInt | TokenKind::KwVoid | TokenKind::KwChar)
+        matches!(self.peek(), TokenKind::KwInt | TokenKind::KwVoid | TokenKind::KwChar | TokenKind::KwStruct)
     }
 
     fn parse_decl_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -496,6 +545,13 @@ impl Parser {
                 let idx = self.parse_expr()?;
                 self.expect(&TokenKind::RBracket)?;
                 e = Expr::Index(Box::new(e), Box::new(idx));
+            } else if self.eat(&TokenKind::Dot) {
+                let field = self.expect_ident()?;
+                e = Expr::Member(Box::new(e), field);
+            } else if self.eat(&TokenKind::Arrow) {
+                // p->f  ≡  (*p).f
+                let field = self.expect_ident()?;
+                e = Expr::Member(Box::new(Expr::UnOp(UnOp::Deref, Box::new(e))), field);
             } else if self.eat(&TokenKind::PlusPlus) {
                 // post-increment: treat as (e += 1) - 1 ... simplified to AddAssign
                 // For simplicity we treat i++ as ++i (side effect only, not returning old value)
