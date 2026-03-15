@@ -421,9 +421,15 @@ mod tests {
 
     /// Compile and run, returning (return_value, output_string, full_ram).
     fn compile_and_run_ext(c_src: &str, max_cycles: u64) -> (i16, String, Vec<i16>) {
-        let asm = hack_cc::compile(c_src)
+        use hack_cc::output::{emit, OutputFormat};
+        let prog = hack_cc::compile(c_src)
             .unwrap_or_else(|e| panic!("compile error: {}", e));
-        let rom = assemble(&asm)
+        // Use emit() so the __DATA_INIT_HERE__ marker is replaced with data-init asm,
+        // ensuring font table, string literals, and global initializers are present in RAM.
+        let full_asm = emit(&prog, OutputFormat::Asm)
+            .unwrap_or_else(|e| panic!("emit error: {}", e))
+            .main;
+        let rom = assemble(&full_asm)
             .unwrap_or_else(|e| panic!("assemble error: {}", e));
         let mut cpu = Cpu::new();
         let mut cycles = 0u64;
@@ -784,15 +790,16 @@ mod tests {
 
     // ── Font / draw_char / draw_string tests ─────────────────────────────────
 
-    /// Verify the font table is initialized in RAM at FONT_BASE.
+    /// Verify the font table is initialized in RAM at FONT_BASE when draw_char is used.
     /// 'A' is ASCII 65, index 33 (65-32), font starts at FONT_BASE + 33*8 = 25264.
-    /// Row 0 of 'A' is 0x18; reverse_bits(0x18) = 0x18 (symmetric byte).
+    /// Row 0 of 'A' is 0x18; row 4 is 0x7E; row 7 is 0x00.
     #[test]
     fn test_font_table_init() {
         use hack_cc::FONT_BASE;
+        // draw_char triggers font table initialization in RAM
         let (_, _, ram) = compile_and_run_ext(
-            "int main() { return 0; }",
-            200_000,
+            "int main() { draw_char(0, 0, 65); return 0; }",
+            4_000_000,
         );
         let a_base = FONT_BASE + 33 * 8; // 'A' font data starts here
         assert_eq!(ram[a_base]     as u16, 0x18u16, "row0 of 'A'");
@@ -934,5 +941,281 @@ int main() {
 }
 "#, 200_000);
         assert_eq!(ret, 2);
+    }
+
+    // ── Array tests ───────────────────────────────────────────────────────
+    // Note: array indexing (int arr[N]) is not yet supported by this compiler.
+    // The following tests use pointer-based patterns that DO work.
+
+    #[test]
+    fn test_multi_param_function() {
+        // Three-argument function with mixed arithmetic
+        let ret = compile_and_run(r#"
+int compute(int a, int b, int c) { return a * b + c; }
+int main() { return compute(3, 4, 5); }
+"#, 2_000_000);
+        assert_eq!(ret, 17);
+    }
+
+    #[test]
+    fn test_accumulate_via_globals() {
+        // Simulate array accumulation using a global counter
+        let ret = compile_and_run(r#"
+int sum;
+void add_to_sum(int v) { sum = sum + v; }
+int main() {
+    sum = 0;
+    add_to_sum(1); add_to_sum(2); add_to_sum(3); add_to_sum(4); add_to_sum(5);
+    return sum;
+}
+"#, 500_000);
+        assert_eq!(ret, 15);
+    }
+
+    #[test]
+    fn test_pointer_index_via_struct() {
+        // Use a struct to group multiple values; read by pointer
+        let ret = compile_and_run(r#"
+struct Pair { int x; int y; };
+int sum_pair(struct Pair *p) { return p->x + p->y; }
+int main() {
+    struct Pair v;
+    v.x = 8;
+    v.y = 13;
+    return sum_pair(&v);
+}
+"#, 500_000);
+        assert_eq!(ret, 21);
+    }
+
+    // ── Pointer tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pointer_deref_write() {
+        let ret = compile_and_run(r#"
+int main() {
+    int x;
+    int *p;
+    p = &x;
+    *p = 99;
+    return x;
+}
+"#, 200_000);
+        assert_eq!(ret, 99);
+    }
+
+    #[test]
+    fn test_pointer_swap() {
+        let ret = compile_and_run(r#"
+void swap(int *a, int *b) {
+    int tmp;
+    tmp = *a;
+    *a = *b;
+    *b = tmp;
+}
+int main() {
+    int x;
+    int y;
+    x = 3;
+    y = 7;
+    swap(&x, &y);
+    return x;
+}
+"#, 500_000);
+        assert_eq!(ret, 7);
+    }
+
+    // ── Bitwise operator tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_bitwise_and() {
+        let ret = compile_and_run("int main() { return 255 & 15; }", 200_000);
+        assert_eq!(ret, 15);
+    }
+
+    #[test]
+    fn test_bitwise_or() {
+        let ret = compile_and_run("int main() { return 240 | 15; }", 200_000);
+        assert_eq!(ret, 255);
+    }
+
+    #[test]
+    fn test_bitwise_not() {
+        let ret = compile_and_run("int main() { return ~0; }", 200_000);
+        assert_eq!(ret, -1);
+    }
+
+    // ── Unary and compound assignment tests ───────────────────────────────
+
+    #[test]
+    fn test_unary_minus() {
+        let ret = compile_and_run("int main() { int x; x = 5; return -x; }", 200_000);
+        assert_eq!(ret, -5);
+    }
+
+    #[test]
+    fn test_compound_assign_add() {
+        let ret = compile_and_run("int main() { int x; x = 10; x += 5; return x; }", 200_000);
+        assert_eq!(ret, 15);
+    }
+
+    #[test]
+    fn test_compound_assign_sub() {
+        let ret = compile_and_run("int main() { int x; x = 10; x -= 3; return x; }", 200_000);
+        assert_eq!(ret, 7);
+    }
+
+    #[test]
+    fn test_prefix_increment() {
+        let ret = compile_and_run("int main() { int x; x = 5; return ++x; }", 200_000);
+        assert_eq!(ret, 6);
+    }
+
+    #[test]
+    fn test_postfix_increment() {
+        let ret = compile_and_run("int main() { int x; x = 5; x++; return x; }", 200_000);
+        assert_eq!(ret, 6);
+    }
+
+    // ── Ternary operator / conditional expression ─────────────────────────
+    // (ternary '?:' is not supported by this compiler; skip those tests)
+
+    // ── Dead-code elimination tests ───────────────────────────────────────
+
+    /// Programs that don't use mul/div/puts should not emit those runtime helpers.
+    #[test]
+    fn test_no_runtime_without_mul() {
+        let prog = hack_cc::compile("int main() { return 2 + 3; }").unwrap();
+        assert!(!prog.asm.contains("(__mul)"), "mul helper should not be emitted");
+        assert!(!prog.asm.contains("(__div)"), "div helper should not be emitted");
+        assert!(!prog.asm.contains("(__puts)"), "puts helper should not be emitted");
+    }
+
+    #[test]
+    fn test_mul_emitted_when_used() {
+        let prog = hack_cc::compile("int main() { return 6 * 7; }").unwrap();
+        assert!(prog.asm.contains("(__mul)"), "mul helper must be emitted when * is used");
+    }
+
+    #[test]
+    fn test_div_emitted_when_used() {
+        let prog = hack_cc::compile("int main() { return 10 / 2; }").unwrap();
+        assert!(prog.asm.contains("(__div)"), "div helper must be emitted when / is used");
+    }
+
+    #[test]
+    fn test_puts_emitted_when_used() {
+        let prog = hack_cc::compile(r#"int main() { puts("hi"); return 0; }"#).unwrap();
+        assert!(prog.asm.contains("(__puts)"), "puts helper must be emitted when puts() is called");
+    }
+
+    #[test]
+    fn test_dead_function_eliminated() {
+        let prog = hack_cc::compile(
+            "int unused() { return 99; } int main() { return 1; }"
+        ).unwrap();
+        assert!(!prog.asm.contains("(unused)"), "unreachable function should not be emitted");
+    }
+
+    #[test]
+    fn test_reachable_function_kept() {
+        let prog = hack_cc::compile(
+            "int used() { return 99; } int main() { return used(); }"
+        ).unwrap();
+        assert!(prog.asm.contains("(used)"), "reachable function must be emitted");
+    }
+
+    // ── Output format tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_hack_format_binary_strings() {
+        use hack_cc::output::{emit, OutputFormat};
+        let prog = hack_cc::compile("int main() { return 0; }").unwrap();
+        let result = emit(&prog, OutputFormat::Hack).unwrap();
+        for line in result.main.lines() {
+            assert_eq!(line.len(), 16, "each .hack line must be 16 chars: {:?}", line);
+            assert!(line.chars().all(|c| c == '0' || c == '1'), "only 0/1 in .hack: {:?}", line);
+        }
+    }
+
+    #[test]
+    fn test_hackem_format_header() {
+        use hack_cc::output::{emit, OutputFormat};
+        let prog = hack_cc::compile("int main() { return 0; }").unwrap();
+        let result = emit(&prog, OutputFormat::Hackem).unwrap();
+        assert!(result.main.starts_with("hackem v1.0 0x"),
+            "hackem output must start with version header");
+        assert!(result.main.contains("ROM@"), "hackem output must have ROM@ section");
+    }
+
+    #[test]
+    fn test_hackem_has_ram_section_for_globals() {
+        use hack_cc::output::{emit, OutputFormat};
+        let prog = hack_cc::compile("int g = 42; int main() { return g; }").unwrap();
+        let result = emit(&prog, OutputFormat::Hackem).unwrap();
+        assert!(result.main.contains("RAM@"), "initialized global should produce RAM@ section");
+    }
+
+    #[test]
+    fn test_tst_format_has_companion() {
+        use hack_cc::output::{emit, OutputFormat};
+        let prog = hack_cc::compile("int main() { return 0; }").unwrap();
+        let result = emit(&prog, OutputFormat::Tst).unwrap();
+        assert!(result.hack_companion.is_some(), "tst format must produce a companion .hack file");
+        assert!(result.main.contains("load"), "tst script must contain 'load'");
+        assert!(result.main.contains("ticktock"), "tst script must contain 'ticktock'");
+    }
+
+    #[test]
+    fn test_asm_format_no_companion() {
+        use hack_cc::output::{emit, OutputFormat};
+        let prog = hack_cc::compile("int main() { return 0; }").unwrap();
+        let result = emit(&prog, OutputFormat::Asm).unwrap();
+        assert!(result.hack_companion.is_none(), "asm format must not produce a companion file");
+    }
+
+    // ── Global variable initializer tests ────────────────────────────────
+
+    #[test]
+    fn test_global_initializer() {
+        let ret = compile_and_run("int g = 7; int main() { return g; }", 200_000);
+        assert_eq!(ret, 7);
+    }
+
+    #[test]
+    fn test_multiple_globals() {
+        let ret = compile_and_run(
+            "int a = 3; int b = 4; int main() { return a + b; }",
+            200_000);
+        assert_eq!(ret, 7);
+    }
+
+    // ── Recursive and multi-call tests ────────────────────────────────────
+
+    #[test]
+    fn test_nested_calls() {
+        let ret = compile_and_run(r#"
+int double(int x) { return x + x; }
+int quad(int x)   { return double(double(x)); }
+int main() { return quad(3); }
+"#, 500_000);
+        assert_eq!(ret, 12);
+    }
+
+    // ── Shift / mixed arithmetic ──────────────────────────────────────────
+
+    #[test]
+    fn test_negative_modulo() {
+        // C semantics: -7 % 3 should be -1 on most platforms; verify compiler matches
+        let ret = compile_and_run("int main() { return (-7) % 3; }", 2_000_000);
+        // Accept -1 or 2 (implementation-defined); just confirm it compiles and runs
+        assert!(ret == -1 || ret == 2, "unexpected modulo result: {}", ret);
+    }
+
+    #[test]
+    fn test_large_multiply() {
+        // 100 * 100 = 10000 (fits in i16: max 32767)
+        let ret = compile_and_run("int main() { return 100 * 100; }", 5_000_000);
+        assert_eq!(ret, 10000);
     }
 }

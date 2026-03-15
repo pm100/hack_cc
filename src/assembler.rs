@@ -168,3 +168,160 @@ fn parse_jump(s: &str) -> Result<u16, AssembleError> {
         _ => return Err(AssembleError::new(format!("unknown jump condition: '{}'", s))),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::assemble;
+
+    /// Helper: assemble a snippet and return the instruction words.
+    fn asm(src: &str) -> Vec<u16> {
+        assemble(src).unwrap_or_else(|e| panic!("assemble failed: {}", e))
+    }
+
+    // ── A-instructions ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_a_instr_literal_zero() {
+        assert_eq!(asm("@0"), vec![0b0000_0000_0000_0000]);
+    }
+
+    #[test]
+    fn test_a_instr_literal_1() {
+        assert_eq!(asm("@1"), vec![1]);
+    }
+
+    #[test]
+    fn test_a_instr_literal_256() {
+        assert_eq!(asm("@256"), vec![256]);
+    }
+
+    #[test]
+    fn test_a_instr_predefined_sp() {
+        assert_eq!(asm("@SP"), vec![0]);
+    }
+
+    #[test]
+    fn test_a_instr_predefined_screen() {
+        assert_eq!(asm("@SCREEN"), vec![16384]);
+    }
+
+    #[test]
+    fn test_a_instr_predefined_r5() {
+        assert_eq!(asm("@R5"), vec![5]);
+    }
+
+    // ── Labels and forward references ─────────────────────────────────────
+
+    #[test]
+    fn test_label_backward() {
+        // @LOOP should resolve to address 0 (the label sits at instruction 0)
+        let words = asm("(LOOP)\n@LOOP\n0;JMP");
+        assert_eq!(words[0], 0u16, "@LOOP backward reference");
+        assert_eq!(words[1], 0b1110_1010_1000_0111u16, "0;JMP");
+    }
+
+    #[test]
+    fn test_label_forward() {
+        // @END forward reference: END label is at address 1
+        let words = asm("@END\n(END)\n0;JMP");
+        assert_eq!(words[0], 1u16, "@END forward reference");
+    }
+
+    // ── C-instructions ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_c_instr_d_eq_a() {
+        // D=A  => comp=0_110000, dest=D(010), jump=000 => 1110 1100 0001 0000
+        let words = asm("D=A");
+        assert_eq!(words[0], 0b1110_1100_0001_0000);
+    }
+
+    #[test]
+    fn test_c_instr_m_eq_d() {
+        // M=D  => comp=0_001100, dest=M(001), jump=000
+        let words = asm("M=D");
+        assert_eq!(words[0], 0b1110_0011_0000_1000);
+    }
+
+    #[test]
+    fn test_c_instr_d_plus_1() {
+        // D=D+1 => comp=0_011111, dest=D(010), jump=000
+        let words = asm("D=D+1");
+        assert_eq!(words[0], 0b1110_0111_1101_0000);
+    }
+
+    #[test]
+    fn test_c_instr_unconditional_jump() {
+        // 0;JMP => comp=0_101010, dest=000, jump=JMP(111)
+        let words = asm("0;JMP");
+        assert_eq!(words[0], 0b1110_1010_1000_0111);
+    }
+
+    #[test]
+    fn test_c_instr_d_eq_m() {
+        // D=M  => a-bit set(1_110000), dest=D(010), jump=000
+        let words = asm("D=M");
+        assert_eq!(words[0], 0b1111_1100_0001_0000);
+    }
+
+    // ── Variable allocation ───────────────────────────────────────────────
+
+    #[test]
+    fn test_variable_allocated_at_16() {
+        // Unknown symbol @foo → allocated at RAM[16]
+        let words = asm("@foo");
+        assert_eq!(words[0], 16u16);
+    }
+
+    #[test]
+    fn test_two_variables_distinct() {
+        let words = asm("@foo\n@bar");
+        assert_eq!(words[0], 16u16);
+        assert_eq!(words[1], 17u16);
+    }
+
+    #[test]
+    fn test_same_variable_same_address() {
+        let words = asm("@foo\n@foo");
+        assert_eq!(words[0], words[1], "same symbol must map to same address");
+    }
+
+    // ── Comments and blank lines ──────────────────────────────────────────
+
+    #[test]
+    fn test_comments_stripped() {
+        // Inline comment; result same as bare instruction
+        let a = asm("D=A  // set D to A");
+        let b = asm("D=A");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_blank_lines_ignored() {
+        let a = asm("\n\n@1\n\n@2\n");
+        assert_eq!(a, vec![1u16, 2u16]);
+    }
+
+    // ── Multiple instructions ─────────────────────────────────────────────
+
+    #[test]
+    fn test_instruction_count() {
+        // 3 non-label lines → 3 words
+        let words = asm("@0\nD=A\nM=D");
+        assert_eq!(words.len(), 3);
+    }
+
+    // ── Error cases ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_unknown_comp_is_error() {
+        let result = assemble("D=BOGUS");
+        assert!(result.is_err(), "unknown comp field should return an error");
+    }
+
+    #[test]
+    fn test_unknown_jump_is_error() {
+        let result = assemble("0;JBAD");
+        assert!(result.is_err(), "unknown jump condition should return an error");
+    }
+}
