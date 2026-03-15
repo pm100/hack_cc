@@ -133,10 +133,13 @@ fn eval_const(expr: &Expr) -> Result<i32, SemaError> {
 }
 
 fn analyze_func(
-    f: FuncDef,
+    mut f: FuncDef,
     globals: &HashMap<String, VarInfo>,
     struct_defs: &HashMap<String, Vec<(String, Type)>>,
 ) -> Result<AnnotatedFunc, SemaError> {
+    // Alpha-rename shadowed local variables so the flat HashMap can handle them.
+    alpha_rename_func(&f.params, &mut f.body);
+
     let mut vars: HashMap<String, VarInfo> = HashMap::new();
 
     // Insert params
@@ -307,6 +310,116 @@ fn collect_strings_stmt(
             collect_strings_stmt(body, map, lits, next_addr);
         }
         _ => {}
+    }
+}
+
+// ── Alpha-renaming (variable shadowing support) ──────────────────────────────
+
+/// Rename shadowed local variables to unique names so the flat variable HashMap
+/// used by the rest of the compiler can handle nested scopes with the same name.
+/// E.g. `int a = 1; { int a = 2; }` becomes `int a = 1; { int a$1 = 2; }`.
+fn alpha_rename_func(params: &[(Type, String)], body: &mut Vec<Stmt>) {
+    // Count every base name — start at 1 for each param so shadowing locals
+    // get the $1 suffix.
+    let mut counters: HashMap<String, u32> = HashMap::new();
+    let mut initial_scope: HashMap<String, String> = HashMap::new();
+    for (_, name) in params {
+        counters.insert(name.clone(), 1);
+        initial_scope.insert(name.clone(), name.clone());
+    }
+    let mut scopes: Vec<HashMap<String, String>> = vec![initial_scope];
+    alpha_rename_stmts(body, &mut counters, &mut scopes);
+}
+
+fn alpha_rename_stmts(
+    stmts: &mut Vec<Stmt>,
+    counters: &mut HashMap<String, u32>,
+    scopes: &mut Vec<HashMap<String, String>>,
+) {
+    for stmt in stmts {
+        alpha_rename_stmt(stmt, counters, scopes);
+    }
+}
+
+fn alpha_rename_stmt(
+    stmt: &mut Stmt,
+    counters: &mut HashMap<String, u32>,
+    scopes: &mut Vec<HashMap<String, String>>,
+) {
+    match stmt {
+        Stmt::Decl(_, name, init) => {
+            // Determine unique name (first occurrence keeps original name).
+            let count = counters.entry(name.clone()).or_insert(0);
+            let new_name = if *count == 0 {
+                name.clone()
+            } else {
+                format!("{}${}", name, count)
+            };
+            *count += 1;
+            // Add to current scope BEFORE renaming init so the initializer can
+            // reference the new variable (C11 §6.2.1 — scope begins after declarator).
+            scopes.last_mut().unwrap().insert(name.clone(), new_name.clone());
+            *name = new_name;
+            if let Some(e) = init {
+                alpha_rename_expr(e, scopes);
+            }
+        }
+        Stmt::Block(stmts) => {
+            scopes.push(HashMap::new());
+            alpha_rename_stmts(stmts, counters, scopes);
+            scopes.pop();
+        }
+        Stmt::For { init, cond, incr, body } => {
+            // For-loop init, cond, incr, and body share one new scope.
+            scopes.push(HashMap::new());
+            if let Some(s) = init { alpha_rename_stmt(s, counters, scopes); }
+            if let Some(e) = cond { alpha_rename_expr(e, scopes); }
+            if let Some(e) = incr { alpha_rename_expr(e, scopes); }
+            alpha_rename_stmt(body, counters, scopes);
+            scopes.pop();
+        }
+        Stmt::If(cond, then, els) => {
+            alpha_rename_expr(cond, scopes);
+            alpha_rename_stmt(then, counters, scopes);
+            if let Some(e) = els { alpha_rename_stmt(e, counters, scopes); }
+        }
+        Stmt::While(cond, body) => {
+            alpha_rename_expr(cond, scopes);
+            alpha_rename_stmt(body, counters, scopes);
+        }
+        Stmt::Return(e) => {
+            if let Some(e) = e { alpha_rename_expr(e, scopes); }
+        }
+        Stmt::Expr(e) => alpha_rename_expr(e, scopes),
+    }
+}
+
+fn alpha_rename_expr(expr: &mut Expr, scopes: &[HashMap<String, String>]) {
+    match expr {
+        Expr::Ident(name) => {
+            // Look up innermost scope first.
+            for scope in scopes.iter().rev() {
+                if let Some(renamed) = scope.get(name.as_str()) {
+                    *name = renamed.clone();
+                    return;
+                }
+            }
+            // Not found: global or function name — leave unchanged.
+        }
+        Expr::BinOp(_, l, r) => {
+            alpha_rename_expr(l, scopes);
+            alpha_rename_expr(r, scopes);
+        }
+        Expr::UnOp(_, e) => alpha_rename_expr(e, scopes),
+        Expr::Call(_, args) => {
+            for a in args { alpha_rename_expr(a, scopes); }
+        }
+        Expr::Index(a, b) => {
+            alpha_rename_expr(a, scopes);
+            alpha_rename_expr(b, scopes);
+        }
+        Expr::Member(base, _) => alpha_rename_expr(base, scopes),
+        Expr::Num(_) | Expr::StringLit(_) | Expr::Sizeof(_) => {}
     }
 }
 

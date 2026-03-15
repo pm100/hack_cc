@@ -1301,6 +1301,15 @@ impl Gen {
             self.gen_stmt(stmt, &f.vars, &f.name)?;
         }
 
+        // Implicit return 0 for functions that fall off the end without a return.
+        // Explicit `return` statements jump directly to (func$return), bypassing this.
+        self.emit("D=0");
+        self.emit("@SP");
+        self.emit("A=M");
+        self.emit("M=D");
+        self.emit("@SP");
+        self.emit("M=M+1");
+
         // Return label for early exits
         self.emit(&format!("({}$return)", f.name));
 

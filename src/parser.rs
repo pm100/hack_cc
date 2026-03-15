@@ -275,13 +275,22 @@ impl Parser {
         self.expect(&TokenKind::LParen)?;
         let mut params = Vec::new();
         if *self.peek() != TokenKind::RParen {
-            loop {
-                let (ty, pname) = self.parse_typed_decl()?;
-                params.push((ty, pname));
-                if !self.eat(&TokenKind::Comma) { break; }
+            // Handle `(void)` — C syntax for explicitly-no-parameters
+            if *self.peek() == TokenKind::KwVoid && *self.peek_at(1) == TokenKind::RParen {
+                self.advance(); // consume `void`
+            } else {
+                loop {
+                    let (ty, pname) = self.parse_typed_decl()?;
+                    params.push((ty, pname));
+                    if !self.eat(&TokenKind::Comma) { break; }
+                }
             }
         }
         self.expect(&TokenKind::RParen)?;
+        // Allow a semicolon here for forward declarations (skip the body)
+        if self.eat(&TokenKind::Semicolon) {
+            return Ok(FuncDef { ret_ty, name, params, body: vec![] });
+        }
         self.expect(&TokenKind::LBrace)?;
         let body = self.parse_stmts_until_rbrace()?;
         Ok(FuncDef { ret_ty, name, params, body })

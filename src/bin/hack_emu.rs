@@ -29,6 +29,8 @@ struct Args {
     dump_ram: usize,
     screen_out: Option<PathBuf>,
     trace: bool,
+    /// Quiet mode: only emit putchar output to stdout; exit with main's return value.
+    quiet: bool,
 }
 
 fn parse_args() -> Args {
@@ -39,6 +41,7 @@ fn parse_args() -> Args {
     let mut dump_ram = 0usize;
     let mut screen_out = None;
     let mut trace = false;
+    let mut quiet = false;
     let mut i = 0;
     while i < raw.len() {
         match raw[i].as_str() {
@@ -55,6 +58,7 @@ fn parse_args() -> Args {
                 screen_out = Some(PathBuf::from(raw.get(i).unwrap_or_else(|| usage())));
             }
             "--trace" => { trace = true; }
+            "--quiet" => { quiet = true; }
             s if s.starts_with("--") => { eprintln!("unknown flag: {}", s); usage(); }
             s => {
                 if path.is_some() { usage(); }
@@ -63,7 +67,7 @@ fn parse_args() -> Args {
         }
         i += 1;
     }
-    Args { path: path.unwrap_or_else(|| usage()), max_cycles, dump_ram, screen_out, trace }
+    Args { path: path.unwrap_or_else(|| usage()), max_cycles, dump_ram, screen_out, trace, quiet }
 }
 
 // ── Assembler ────────────────────────────────────────────────────────────────
@@ -356,7 +360,9 @@ fn main() {
         std::process::exit(1);
     });
 
-    println!("Loaded {} instructions from {:?}", rom.len(), args.path);
+    if !args.quiet {
+        println!("Loaded {} instructions from {:?}", rom.len(), args.path);
+    }
 
     let mut cpu = Cpu::new();
     let mut cycles = 0u64;
@@ -364,7 +370,9 @@ fn main() {
 
     loop {
         if cycles >= args.max_cycles {
-            println!("Reached cycle limit ({} cycles) — possibly infinite loop or very slow program", args.max_cycles);
+            if !args.quiet {
+                println!("Reached cycle limit ({} cycles) — possibly infinite loop or very slow program", args.max_cycles);
+            }
             break;
         }
         if !cpu.step(&rom, args.trace) {
@@ -372,6 +380,12 @@ fn main() {
             break;
         }
         cycles += 1;
+    }
+
+    // In quiet mode: print only putchar output, then exit with main's return value.
+    if args.quiet {
+        print!("{}", String::from_utf8_lossy(&cpu.output));
+        std::process::exit((cpu.ram[256] as u8) as i32);
     }
 
     println!();
