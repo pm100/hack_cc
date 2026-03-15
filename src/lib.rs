@@ -2,8 +2,10 @@ pub mod lexer;
 pub mod parser;
 pub mod sema;
 pub mod codegen;
+pub mod assembler;
+pub mod output;
 
-pub use codegen::FONT_BASE;
+pub use codegen::{FONT_BASE, DataInit, CompiledProgram};
 
 use thiserror::Error;
 
@@ -17,12 +19,14 @@ pub enum Error {
     Sema(#[from] sema::SemaError),
     #[error("codegen error: {0}")]
     Codegen(#[from] codegen::CodegenError),
+    #[error("assemble error: {0}")]
+    Assemble(#[from] assembler::AssembleError),
 }
 
-pub fn compile(source: &str) -> Result<String, Error> {
+pub fn compile(source: &str) -> Result<CompiledProgram, Error> {
     let tokens = lexer::lex(source)?;
     let program = parser::parse(tokens)?;
     let sema_result = sema::analyze(program)?;
-    let asm = codegen::generate(sema_result)?;
-    Ok(asm)
+    let compiled = codegen::generate(sema_result)?;
+    Ok(compiled)
 }

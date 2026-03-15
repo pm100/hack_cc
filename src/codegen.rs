@@ -132,10 +132,40 @@ const FONT_8X8: [[u8; 8]; 96] = [
     [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // 127 DEL
 ];
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use crate::sema::{SemaResult, AnnotatedFunc, VarInfo, VarStorage, type_size};
 use crate::parser::{Expr, Stmt, BinOp, UnOp, Type};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BuiltinKind {
+    Puts,
+    Strlen,
+    DrawPixel,
+    ClearPixel,
+    FillScreen,
+    ClearScreen,
+    DrawChar,
+    DrawString,
+    Mul,
+    Div,
+}
+
+/// A single RAM pre-initialisation entry produced by the compiler.
+#[derive(Debug, Clone)]
+pub struct DataInit {
+    pub address: u16,
+    pub value: i16,
+}
+
+/// Full result of code generation returned by [`generate`].
+pub struct CompiledProgram {
+    /// Hack assembly text containing a `// __DATA_INIT_HERE__` marker in the bootstrap
+    /// section where data-initialisation code should be inserted for asm/hack formats.
+    pub asm: String,
+    /// RAM data initialisations (globals, string literals, font table if used).
+    pub data: Vec<DataInit>,
+}
 
 #[derive(Debug, Error)]
 #[error("codegen error: {0}")]
@@ -150,15 +180,16 @@ struct Gen {
     label_id: usize,
     string_map: HashMap<String, usize>,
     struct_defs: HashMap<String, Vec<(String, Type)>>,
+    used_builtins: HashSet<BuiltinKind>,
 }
 
 impl Gen {
     fn new(
-        _func_sigs: HashMap<String, (Type, usize)>,
         string_map: HashMap<String, usize>,
         struct_defs: HashMap<String, Vec<(String, Type)>>,
+        used_builtins: HashSet<BuiltinKind>,
     ) -> Self {
-        Self { out: Vec::new(), label_id: 0, string_map, struct_defs }
+        Self { out: Vec::new(), label_id: 0, string_map, struct_defs, used_builtins }
     }
 
     fn emit(&mut self, s: impl Into<String>) {
@@ -1338,521 +1369,586 @@ impl Gen {
     // ── Runtime subroutines ──────────────────────────────────────────────
 
     fn emit_runtime(&mut self) {
-        // __mul: R13 * R14, result in R13. Return via R3.
-        self.emit("");
-        self.emit("// === Runtime: __mul ===");
-        self.emit("(__mul)");
-        // Result in R15
-        self.emit("@R15");
-        self.emit("M=0");
-        // Check for zero operands
-        self.emit("@R13");
-        self.emit("D=M");
-        self.emit("@__mul_end");
-        self.emit("D;JEQ");
-        self.emit("@R14");
-        self.emit("D=M");
-        self.emit("@__mul_end");
-        self.emit("D;JEQ");
-        // Determine sign: R5 = sign flag (0 = positive)
-        self.emit("@R5");
-        self.emit("M=0");
-        // Make R13 positive
-        self.emit("@R13");
-        self.emit("D=M");
-        self.emit("@__mul_r13p");
-        self.emit("D;JGE");
-        self.emit("@R5");
-        self.emit("M=!M");
-        self.emit("@R13");
-        self.emit("M=-M");
-        self.emit("(__mul_r13p)");
-        // Make R14 positive
-        self.emit("@R14");
-        self.emit("D=M");
-        self.emit("@__mul_r14p");
-        self.emit("D;JGE");
-        self.emit("@R5");
-        self.emit("M=!M");
-        self.emit("@R14");
-        self.emit("M=-M");
-        self.emit("(__mul_r14p)");
-        // R15 = 0; while R14 > 0: R15 += R13; R14--
-        self.emit("(__mul_loop)");
-        self.emit("@R14");
-        self.emit("D=M");
-        self.emit("@__mul_done");
-        self.emit("D;JEQ");
-        self.emit("@R13");
-        self.emit("D=M");
-        self.emit("@R15");
-        self.emit("M=M+D");
-        self.emit("@R14");
-        self.emit("M=M-1");
-        self.emit("@__mul_loop");
-        self.emit("0;JMP");
-        self.emit("(__mul_done)");
-        // Apply sign
-        self.emit("@R5");
-        self.emit("D=M");
-        self.emit("@__mul_pos");
-        self.emit("D;JEQ");
-        self.emit("@R15");
-        self.emit("M=-M");
-        self.emit("(__mul_pos)");
-        self.emit("(__mul_end)");
-        self.emit("@R15");
-        self.emit("D=M");
-        self.emit("@R13");
-        self.emit("M=D");
-        self.emit("@R3");
-        self.emit("A=M");
-        self.emit("0;JMP");
+        let need_mul          = self.used_builtins.contains(&BuiltinKind::Mul);
+        let need_div          = self.used_builtins.contains(&BuiltinKind::Div);
+        let need_puts         = self.used_builtins.contains(&BuiltinKind::Puts);
+        let need_strlen       = self.used_builtins.contains(&BuiltinKind::Strlen);
+        let need_draw_pixel   = self.used_builtins.contains(&BuiltinKind::DrawPixel);
+        let need_clear_pixel  = self.used_builtins.contains(&BuiltinKind::ClearPixel);
+        let need_fill_screen  = self.used_builtins.contains(&BuiltinKind::FillScreen);
+        let need_clear_screen = self.used_builtins.contains(&BuiltinKind::ClearScreen);
+        let need_draw_char    = self.used_builtins.contains(&BuiltinKind::DrawChar);
+        let need_draw_string  = self.used_builtins.contains(&BuiltinKind::DrawString);
 
-        // __div: R13 / R14 = quotient in R13, remainder in R15. Return via R3.
-        self.emit("");
-        self.emit("// === Runtime: __div ===");
-        self.emit("(__div)");
-        // Handle division by zero: result = 0
-        self.emit("@R14");
-        self.emit("D=M");
-        self.emit("@__div_zero");
-        self.emit("D;JEQ");
-        // Sign handling
-        self.emit("@R5");
-        self.emit("M=0"); // sign of quotient
-        self.emit("@R6");
-        self.emit("M=0"); // sign of remainder
-        // Make R13 positive
-        self.emit("@R13");
-        self.emit("D=M");
-        self.emit("@__div_r13p");
-        self.emit("D;JGE");
-        self.emit("@R5");
-        self.emit("M=!M");
-        self.emit("@R6");
-        self.emit("M=!M");
-        self.emit("@R13");
-        self.emit("M=-M");
-        self.emit("(__div_r13p)");
-        // Make R14 positive
-        self.emit("@R14");
-        self.emit("D=M");
-        self.emit("@__div_r14p");
-        self.emit("D;JGE");
-        self.emit("@R5");
-        self.emit("M=!M");
-        self.emit("@R14");
-        self.emit("M=-M");
-        self.emit("(__div_r14p)");
-        // R15 = R13; R13 = 0 (quotient); subtract R14 from R15 repeatedly
-        self.emit("@R13");
-        self.emit("D=M");
-        self.emit("@R15");
-        self.emit("M=D"); // R15 = dividend (will become remainder)
-        self.emit("@R13");
-        self.emit("M=0"); // quotient = 0
-        self.emit("(__div_loop)");
-        self.emit("@R15");
-        self.emit("D=M");
-        self.emit("@R14");
-        self.emit("D=D-M"); // D = R15 - R14
-        self.emit("@__div_done");
-        self.emit("D;JLT");
-        self.emit("@R15");
-        self.emit("M=D"); // R15 -= R14
-        self.emit("@R13");
-        self.emit("M=M+1"); // quotient++
-        self.emit("@__div_loop");
-        self.emit("0;JMP");
-        self.emit("(__div_done)");
-        // Apply sign to quotient
-        self.emit("@R5");
-        self.emit("D=M");
-        self.emit("@__div_qpos");
-        self.emit("D;JEQ");
-        self.emit("@R13");
-        self.emit("M=-M");
-        self.emit("(__div_qpos)");
-        // Apply sign to remainder
-        self.emit("@R6");
-        self.emit("D=M");
-        self.emit("@__div_rpos");
-        self.emit("D;JEQ");
-        self.emit("@R15");
-        self.emit("M=-M");
-        self.emit("(__div_rpos)");
-        self.emit("@R3");
-        self.emit("A=M");
-        self.emit("0;JMP");
-        self.emit("(__div_zero)");
-        self.emit("@R13");
-        self.emit("M=0");
-        self.emit("@R15");
-        self.emit("M=0");
-        self.emit("@R3");
-        self.emit("A=M");
-        self.emit("0;JMP");
-
-        // __puts: print null-terminated string at R13, then newline. Return via R3.
-        self.emit("");
-        self.emit("// === Runtime: __puts ===");
-        self.emit("(__puts)");
-        self.emit("@R13");
-        self.emit("A=M");
-        self.emit("D=M");           // D = *R13
-        self.emit("@__puts_end");
-        self.emit("D;JEQ");         // if *R13 == 0, done
-        self.emit(&format!("@{}", HACK_OUTPUT_PORT));
-        self.emit("M=D");           // output the char
-        self.emit("@R13");
-        self.emit("M=M+1");         // R13++
-        self.emit("@__puts");
-        self.emit("0;JMP");
-        self.emit("(__puts_end)");
-        self.emit("@10");           // '\n'
-        self.emit("D=A");
-        self.emit(&format!("@{}", HACK_OUTPUT_PORT));
-        self.emit("M=D");
-        self.emit("@R3");
-        self.emit("A=M");
-        self.emit("0;JMP");
-
-        // __strlen: length of null-terminated string at R13. Result in R13. Return via R3.
-        self.emit("");
-        self.emit("// === Runtime: __strlen ===");
-        self.emit("(__strlen)");
-        self.emit("@R14");
-        self.emit("M=0");           // R14 = count = 0
-        self.emit("(__strlen_loop)");
-        self.emit("@R13");
-        self.emit("A=M");
-        self.emit("D=M");           // D = *R13
-        self.emit("@__strlen_end");
-        self.emit("D;JEQ");         // if *R13 == 0, done
-        self.emit("@R13");
-        self.emit("M=M+1");         // R13++ (ptr advance)
-        self.emit("@R14");
-        self.emit("M=M+1");         // count++
-        self.emit("@__strlen_loop");
-        self.emit("0;JMP");
-        self.emit("(__strlen_end)");
-        self.emit("@R14");
-        self.emit("D=M");
-        self.emit("@R13");
-        self.emit("M=D");           // R13 = count (result)
-        self.emit("@R3");
-        self.emit("A=M");
-        self.emit("0;JMP");
-
-        // __draw_pixel: set pixel (R13=x, R14=y) to black. Return via R3.
-        // Pixel addr = 16384 + y*32 + x/16. Bit = x%16. RAM[addr] |= (1<<bit).
-        // Uses R5 (y*32), R6 (x/16), R7 (x%16 / shift counter), R8 (addr), R9 (mask).
-        self.emit("");
-        self.emit("// === Runtime: __draw_pixel ===");
-        self.emit("(__draw_pixel)");
-        // y * 32 -> R5 (5 doublings)
-        self.emit("@R14"); self.emit("D=M");
-        self.emit("@R5");  self.emit("M=D");   // R5 = y
-        for _ in 0..5 {
-            self.emit("@R5"); self.emit("D=M"); self.emit("M=D+M"); // R5 *= 2
+        if need_mul {
+            // __mul: R13 * R14, result in R13. Return via R3.
+            self.emit("");
+            self.emit("// === Runtime: __mul ===");
+            self.emit("(__mul)");
+            self.emit("@R15");
+            self.emit("M=0");
+            self.emit("@R13");
+            self.emit("D=M");
+            self.emit("@__mul_end");
+            self.emit("D;JEQ");
+            self.emit("@R14");
+            self.emit("D=M");
+            self.emit("@__mul_end");
+            self.emit("D;JEQ");
+            self.emit("@R5");
+            self.emit("M=0");
+            self.emit("@R13");
+            self.emit("D=M");
+            self.emit("@__mul_r13p");
+            self.emit("D;JGE");
+            self.emit("@R5");
+            self.emit("M=!M");
+            self.emit("@R13");
+            self.emit("M=-M");
+            self.emit("(__mul_r13p)");
+            self.emit("@R14");
+            self.emit("D=M");
+            self.emit("@__mul_r14p");
+            self.emit("D;JGE");
+            self.emit("@R5");
+            self.emit("M=!M");
+            self.emit("@R14");
+            self.emit("M=-M");
+            self.emit("(__mul_r14p)");
+            self.emit("(__mul_loop)");
+            self.emit("@R14");
+            self.emit("D=M");
+            self.emit("@__mul_done");
+            self.emit("D;JEQ");
+            self.emit("@R13");
+            self.emit("D=M");
+            self.emit("@R15");
+            self.emit("M=M+D");
+            self.emit("@R14");
+            self.emit("M=M-1");
+            self.emit("@__mul_loop");
+            self.emit("0;JMP");
+            self.emit("(__mul_done)");
+            self.emit("@R5");
+            self.emit("D=M");
+            self.emit("@__mul_pos");
+            self.emit("D;JEQ");
+            self.emit("@R15");
+            self.emit("M=-M");
+            self.emit("(__mul_pos)");
+            self.emit("(__mul_end)");
+            self.emit("@R15");
+            self.emit("D=M");
+            self.emit("@R13");
+            self.emit("M=D");
+            self.emit("@R3");
+            self.emit("A=M");
+            self.emit("0;JMP");
         }
-        // x / 16 -> R6,  x % 16 -> R7
-        self.emit("@R13"); self.emit("D=M");
-        self.emit("@R7");  self.emit("M=D");   // R7 = x
-        self.emit("@R6");  self.emit("M=0");   // R6 = quotient
-        self.emit("(__dp_div16)");
-        self.emit("@R7"); self.emit("D=M");
-        self.emit("@16"); self.emit("D=D-A");
-        self.emit("@__dp_div16_done"); self.emit("D;JLT");
-        self.emit("@R7"); self.emit("M=D");    // R7 -= 16
-        self.emit("@R6"); self.emit("M=M+1");  // R6++
-        self.emit("@__dp_div16"); self.emit("0;JMP");
-        self.emit("(__dp_div16_done)");        // R6=x/16, R7=x%16
-        // mask = 1 << R7 -> R9
-        self.emit("@R9"); self.emit("M=1");
-        self.emit("(__dp_shift)");
-        self.emit("@R7"); self.emit("D=M");
-        self.emit("@__dp_shift_done"); self.emit("D;JEQ");
-        self.emit("@R9"); self.emit("D=M"); self.emit("M=D+M"); // R9 <<= 1
-        self.emit("@R7"); self.emit("M=M-1");
-        self.emit("@__dp_shift"); self.emit("0;JMP");
-        self.emit("(__dp_shift_done)");
-        // addr = 16384 + R5 + R6 -> R8
-        self.emit("@16384"); self.emit("D=A");
-        self.emit("@R5");    self.emit("D=D+M");
-        self.emit("@R6");    self.emit("D=D+M");
-        self.emit("@R8");    self.emit("M=D");
-        // RAM[R8] |= R9
-        self.emit("@R8"); self.emit("A=M"); self.emit("D=M");
-        self.emit("@R9"); self.emit("D=D|M");
-        self.emit("@R8"); self.emit("A=M"); self.emit("M=D");
-        self.emit("@R3"); self.emit("A=M"); self.emit("0;JMP");
 
-        // __clear_pixel: set pixel (R13=x, R14=y) to white. Return via R3.
-        // Same setup as __draw_pixel; final step: RAM[R8] &= ~R9.
-        self.emit("");
-        self.emit("// === Runtime: __clear_pixel ===");
-        self.emit("(__clear_pixel)");
-        // y * 32 -> R5
-        self.emit("@R14"); self.emit("D=M");
-        self.emit("@R5");  self.emit("M=D");
-        for _ in 0..5 {
-            self.emit("@R5"); self.emit("D=M"); self.emit("M=D+M");
+        if need_div {
+            // __div: R13 / R14 = quotient in R13, remainder in R15. Return via R3.
+            self.emit("");
+            self.emit("// === Runtime: __div ===");
+            self.emit("(__div)");
+            self.emit("@R14");
+            self.emit("D=M");
+            self.emit("@__div_zero");
+            self.emit("D;JEQ");
+            self.emit("@R5");
+            self.emit("M=0");
+            self.emit("@R6");
+            self.emit("M=0");
+            self.emit("@R13");
+            self.emit("D=M");
+            self.emit("@__div_r13p");
+            self.emit("D;JGE");
+            self.emit("@R5");
+            self.emit("M=!M");
+            self.emit("@R6");
+            self.emit("M=!M");
+            self.emit("@R13");
+            self.emit("M=-M");
+            self.emit("(__div_r13p)");
+            self.emit("@R14");
+            self.emit("D=M");
+            self.emit("@__div_r14p");
+            self.emit("D;JGE");
+            self.emit("@R5");
+            self.emit("M=!M");
+            self.emit("@R14");
+            self.emit("M=-M");
+            self.emit("(__div_r14p)");
+            self.emit("@R13");
+            self.emit("D=M");
+            self.emit("@R15");
+            self.emit("M=D");
+            self.emit("@R13");
+            self.emit("M=0");
+            self.emit("(__div_loop)");
+            self.emit("@R15");
+            self.emit("D=M");
+            self.emit("@R14");
+            self.emit("D=D-M");
+            self.emit("@__div_done");
+            self.emit("D;JLT");
+            self.emit("@R15");
+            self.emit("M=D");
+            self.emit("@R13");
+            self.emit("M=M+1");
+            self.emit("@__div_loop");
+            self.emit("0;JMP");
+            self.emit("(__div_done)");
+            self.emit("@R5");
+            self.emit("D=M");
+            self.emit("@__div_qpos");
+            self.emit("D;JEQ");
+            self.emit("@R13");
+            self.emit("M=-M");
+            self.emit("(__div_qpos)");
+            self.emit("@R6");
+            self.emit("D=M");
+            self.emit("@__div_rpos");
+            self.emit("D;JEQ");
+            self.emit("@R15");
+            self.emit("M=-M");
+            self.emit("(__div_rpos)");
+            self.emit("@R3");
+            self.emit("A=M");
+            self.emit("0;JMP");
+            self.emit("(__div_zero)");
+            self.emit("@R13");
+            self.emit("M=0");
+            self.emit("@R15");
+            self.emit("M=0");
+            self.emit("@R3");
+            self.emit("A=M");
+            self.emit("0;JMP");
         }
-        // x / 16 -> R6,  x % 16 -> R7
-        self.emit("@R13"); self.emit("D=M");
-        self.emit("@R7");  self.emit("M=D");
-        self.emit("@R6");  self.emit("M=0");
-        self.emit("(__cp_div16)");
-        self.emit("@R7"); self.emit("D=M");
-        self.emit("@16"); self.emit("D=D-A");
-        self.emit("@__cp_div16_done"); self.emit("D;JLT");
-        self.emit("@R7"); self.emit("M=D");
-        self.emit("@R6"); self.emit("M=M+1");
-        self.emit("@__cp_div16"); self.emit("0;JMP");
-        self.emit("(__cp_div16_done)");
-        // mask = 1 << R7 -> R9
-        self.emit("@R9"); self.emit("M=1");
-        self.emit("(__cp_shift)");
-        self.emit("@R7"); self.emit("D=M");
-        self.emit("@__cp_shift_done"); self.emit("D;JEQ");
-        self.emit("@R9"); self.emit("D=M"); self.emit("M=D+M");
-        self.emit("@R7"); self.emit("M=M-1");
-        self.emit("@__cp_shift"); self.emit("0;JMP");
-        self.emit("(__cp_shift_done)");
-        // addr = 16384 + R5 + R6 -> R8
-        self.emit("@16384"); self.emit("D=A");
-        self.emit("@R5");    self.emit("D=D+M");
-        self.emit("@R6");    self.emit("D=D+M");
-        self.emit("@R8");    self.emit("M=D");
-        // RAM[R8] &= ~R9
-        self.emit("@R9"); self.emit("D=!M");   // D = ~mask
-        self.emit("@R8"); self.emit("A=M"); self.emit("D=D&M");
-        self.emit("@R8"); self.emit("A=M"); self.emit("M=D");
-        self.emit("@R3"); self.emit("A=M"); self.emit("0;JMP");
 
-        // __fill_screen: fill all screen words with -1 (all pixels black). Return via R3.
-        self.emit("");
-        self.emit("// === Runtime: __fill_screen ===");
-        self.emit("(__fill_screen)");
-        self.emit("@16384"); self.emit("D=A");
-        self.emit("@R13");   self.emit("M=D");  // R13 = current addr
-        self.emit("(__fill_loop)");
-        self.emit("@24576"); self.emit("D=A");
-        self.emit("@R13");   self.emit("D=D-M");
-        self.emit("@__fill_done"); self.emit("D;JLE"); // if R13 >= 24576, done
-        self.emit("@R13"); self.emit("A=M"); self.emit("M=-1");
-        self.emit("@R13"); self.emit("M=M+1");
-        self.emit("@__fill_loop"); self.emit("0;JMP");
-        self.emit("(__fill_done)");
-        self.emit("@R3"); self.emit("A=M"); self.emit("0;JMP");
+        if need_puts {
+            // __puts: print null-terminated string at R13, then newline. Return via R3.
+            self.emit("");
+            self.emit("// === Runtime: __puts ===");
+            self.emit("(__puts)");
+            self.emit("@R13");
+            self.emit("A=M");
+            self.emit("D=M");
+            self.emit("@__puts_end");
+            self.emit("D;JEQ");
+            self.emit(&format!("@{}", HACK_OUTPUT_PORT));
+            self.emit("M=D");
+            self.emit("@R13");
+            self.emit("M=M+1");
+            self.emit("@__puts");
+            self.emit("0;JMP");
+            self.emit("(__puts_end)");
+            self.emit("@10");
+            self.emit("D=A");
+            self.emit(&format!("@{}", HACK_OUTPUT_PORT));
+            self.emit("M=D");
+            self.emit("@R3");
+            self.emit("A=M");
+            self.emit("0;JMP");
+        }
 
-        // __clear_screen: fill all screen words with 0 (all pixels white). Return via R3.
-        self.emit("");
-        self.emit("// === Runtime: __clear_screen ===");
-        self.emit("(__clear_screen)");
-        self.emit("@16384"); self.emit("D=A");
-        self.emit("@R13");   self.emit("M=D");
-        self.emit("(__clrscr_loop)");
-        self.emit("@24576"); self.emit("D=A");
-        self.emit("@R13");   self.emit("D=D-M");
-        self.emit("@__clrscr_done"); self.emit("D;JLE");
-        self.emit("@R13"); self.emit("A=M"); self.emit("M=0");
-        self.emit("@R13"); self.emit("M=M+1");
-        self.emit("@__clrscr_loop"); self.emit("0;JMP");
-        self.emit("(__clrscr_done)");
-        self.emit("@R3"); self.emit("A=M"); self.emit("0;JMP");
+        if need_strlen {
+            // __strlen: length of null-terminated string at R13. Result in R13. Return via R3.
+            self.emit("");
+            self.emit("// === Runtime: __strlen ===");
+            self.emit("(__strlen)");
+            self.emit("@R14");
+            self.emit("M=0");
+            self.emit("(__strlen_loop)");
+            self.emit("@R13");
+            self.emit("A=M");
+            self.emit("D=M");
+            self.emit("@__strlen_end");
+            self.emit("D;JEQ");
+            self.emit("@R13");
+            self.emit("M=M+1");
+            self.emit("@R14");
+            self.emit("M=M+1");
+            self.emit("@__strlen_loop");
+            self.emit("0;JMP");
+            self.emit("(__strlen_end)");
+            self.emit("@R14");
+            self.emit("D=M");
+            self.emit("@R13");
+            self.emit("M=D");
+            self.emit("@R3");
+            self.emit("A=M");
+            self.emit("0;JMP");
+        }
 
-        // __draw_char: draw character at text cell.
-        // Inputs: R13=col (0-63), R14=row (0-31), R15=char_code. Return via R3.
-        // Uses: R5(row_ctr), R6(font_ptr), R7(word_col), R8(within_word 0=low/1=high),
-        //       R9(screen_addr), R10(font_byte), R11(temp), R12(saved_R3).
-        // Screen layout: col/2 = screen word column, col%2: 0=low byte, 1=high byte.
-        // Font bytes are stored bit-reversed (bit0=leftmost) to match Hack screen.
-        self.emit("");
-        self.emit("// === Runtime: __draw_char ===");
-        self.emit("(__draw_char)");
-        // Save return address to R12
-        self.emit("@R3"); self.emit("D=M"); self.emit("@R12"); self.emit("M=D");
-        // Compute word_col = col/2 -> R7; within_word = col%2 -> R8
-        self.emit("@R13"); self.emit("D=M"); self.emit("@R7"); self.emit("M=0"); self.emit("@R8"); self.emit("M=D");
-        self.emit("(__dc_div2)");
-        self.emit("@R8"); self.emit("D=M"); self.emit("@2"); self.emit("D=D-A");
-        self.emit("@__dc_div2_done"); self.emit("D;JLT");
-        self.emit("@R8"); self.emit("M=D");   // R8 -= 2
-        self.emit("@R7"); self.emit("M=M+1"); // R7++
-        self.emit("@__dc_div2"); self.emit("0;JMP");
-        self.emit("(__dc_div2_done)");        // R7 = col/2, R8 = col%2 (0 or 1)
-        // Compute screen_addr = 16384 + row*256 + word_col -> R9
-        // row*256 via 8 doublings
-        self.emit("@R14"); self.emit("D=M"); self.emit("@R9"); self.emit("M=D");
-        for _ in 0..8 {
+        if need_draw_pixel {
+            // __draw_pixel: set pixel (R13=x, R14=y) to black. Return via R3.
+            self.emit("");
+            self.emit("// === Runtime: __draw_pixel ===");
+            self.emit("(__draw_pixel)");
+            self.emit("@R14"); self.emit("D=M");
+            self.emit("@R5");  self.emit("M=D");
+            for _ in 0..5 {
+                self.emit("@R5"); self.emit("D=M"); self.emit("M=D+M");
+            }
+            self.emit("@R13"); self.emit("D=M");
+            self.emit("@R7");  self.emit("M=D");
+            self.emit("@R6");  self.emit("M=0");
+            self.emit("(__dp_div16)");
+            self.emit("@R7"); self.emit("D=M");
+            self.emit("@16"); self.emit("D=D-A");
+            self.emit("@__dp_div16_done"); self.emit("D;JLT");
+            self.emit("@R7"); self.emit("M=D");
+            self.emit("@R6"); self.emit("M=M+1");
+            self.emit("@__dp_div16"); self.emit("0;JMP");
+            self.emit("(__dp_div16_done)");
+            self.emit("@R9"); self.emit("M=1");
+            self.emit("(__dp_shift)");
+            self.emit("@R7"); self.emit("D=M");
+            self.emit("@__dp_shift_done"); self.emit("D;JEQ");
             self.emit("@R9"); self.emit("D=M"); self.emit("M=D+M");
+            self.emit("@R7"); self.emit("M=M-1");
+            self.emit("@__dp_shift"); self.emit("0;JMP");
+            self.emit("(__dp_shift_done)");
+            self.emit("@16384"); self.emit("D=A");
+            self.emit("@R5");    self.emit("D=D+M");
+            self.emit("@R6");    self.emit("D=D+M");
+            self.emit("@R8");    self.emit("M=D");
+            self.emit("@R8"); self.emit("A=M"); self.emit("D=M");
+            self.emit("@R9"); self.emit("D=D|M");
+            self.emit("@R8"); self.emit("A=M"); self.emit("M=D");
+            self.emit("@R3"); self.emit("A=M"); self.emit("0;JMP");
         }
-        self.emit(&format!("@{}", 16384)); self.emit("D=A");
-        self.emit("@R9"); self.emit("D=D+M");
-        self.emit("@R7"); self.emit("D=D+M");
-        self.emit("@R9"); self.emit("M=D"); // R9 = 16384 + row*256 + word_col
-        // Compute font_ptr = FONT_BASE + (char-32)*8 -> R6
-        self.emit("@R15"); self.emit("D=M");
-        self.emit("@32");  self.emit("D=D-A");
-        self.emit("@R6");  self.emit("M=D");  // R6 = char-32
-        // (char-32)*8 via 3 doublings
-        for _ in 0..3 {
-            self.emit("@R6"); self.emit("D=M"); self.emit("M=D+M");
-        }
-        self.emit(&format!("@{}", FONT_BASE)); self.emit("D=A");
-        self.emit("@R6"); self.emit("M=D+M"); // R6 = FONT_BASE + (char-32)*8
-        // Row loop: draw 8 rows
-        self.emit("@R5"); self.emit("M=0"); // R5 = row counter
-        self.emit("(__dc_row_loop)");
-        self.emit("@R5"); self.emit("D=M"); self.emit("@8"); self.emit("D=D-A");
-        self.emit("@__dc_row_done"); self.emit("D;JGE");
-        // Load font byte: R10 = RAM[R6]
-        self.emit("@R6"); self.emit("A=M"); self.emit("D=M");
-        self.emit("@R10"); self.emit("M=D");
-        // Branch on within_word
-        self.emit("@R8"); self.emit("D=M");
-        self.emit("@__dc_high"); self.emit("D;JNE");
-        // ── Even col: write font_byte to LOW byte (bits 0-7) of screen word ──
-        // new_word = (screen_word & 0xFF00) | font_byte
-        // D=!A with A=255 gives D=~255=0xFF00
-        self.emit("@255"); self.emit("D=!A");
-        self.emit("@R11"); self.emit("M=D");           // R11 = 0xFF00
-        self.emit("@R9"); self.emit("A=M"); self.emit("D=M"); // D = screen_word
-        self.emit("@R11"); self.emit("D=D&M");         // D = screen_word & 0xFF00
-        self.emit("@R10"); self.emit("D=D|M");         // D |= font_byte
-        self.emit("@R9"); self.emit("A=M"); self.emit("M=D");
-        self.emit("@__dc_row_cont"); self.emit("0;JMP");
-        // ── Odd col: write font_byte to HIGH byte (bits 8-15) of screen word ──
-        // font_byte_shifted = font_byte * 256 (8 doublings) -> R11
-        // new_word = (screen_word & 0xFF) | font_byte_shifted
-        self.emit("(__dc_high)");
-        self.emit("@R10"); self.emit("D=M"); self.emit("@R11"); self.emit("M=D");
-        for _ in 0..8 {
-            self.emit("@R11"); self.emit("D=M"); self.emit("M=D+M");
-        }
-        // (screen_word & 0xFF) | R11
-        self.emit("@255"); self.emit("D=A");
-        self.emit("@R9"); self.emit("A=M"); self.emit("D=D&M"); // D = screen_word & 0xFF
-        self.emit("@R11"); self.emit("D=D|M");                  // D |= shifted_byte
-        self.emit("@R9"); self.emit("A=M"); self.emit("M=D");
-        // ── Advance to next font row and next screen row ──
-        self.emit("(__dc_row_cont)");
-        self.emit("@R6"); self.emit("M=M+1");                   // font_ptr++
-        self.emit("@32"); self.emit("D=A"); self.emit("@R9"); self.emit("M=D+M"); // screen_addr+=32
-        self.emit("@R5"); self.emit("M=M+1");                   // row++
-        self.emit("@__dc_row_loop"); self.emit("0;JMP");
-        self.emit("(__dc_row_done)");
-        self.emit("@R12"); self.emit("A=M"); self.emit("0;JMP");
 
-        // __draw_string: draw null-terminated string at text cell.
-        // Inputs: R13=col, R14=row, R15=str_ptr. Return via R3.
-        // Saves R3 to R4 (draw_char saves R3 to R12, so no conflict).
-        // Saves R5,R6 to stack around each draw_char call (draw_char uses them).
-        self.emit("");
-        self.emit("// === Runtime: __draw_string ===");
-        self.emit("(__draw_string)");
-        self.emit("@R3"); self.emit("D=M"); self.emit("@R4"); self.emit("M=D"); // save R3->R4
-        self.emit("@R15"); self.emit("D=M"); self.emit("@R5"); self.emit("M=D"); // R5=str_ptr
-        self.emit("@R13"); self.emit("D=M"); self.emit("@R6"); self.emit("M=D"); // R6=col
-        self.emit("(__ds_loop)");
-        self.emit("@R5"); self.emit("A=M"); self.emit("D=M"); // D = *ptr
-        self.emit("@__ds_done"); self.emit("D;JEQ");
-        // Push R5, R6 to stack (draw_char clobbers them)
-        self.emit("@R5"); self.emit("D=M"); self.emit("@SP"); self.emit("A=M"); self.emit("M=D"); self.emit("@SP"); self.emit("M=M+1");
-        self.emit("@R6"); self.emit("D=M"); self.emit("@SP"); self.emit("A=M"); self.emit("M=D"); self.emit("@SP"); self.emit("M=M+1");
-        // Set up draw_char args: R13=col, R14=row (already), R15=char
-        self.emit("@R6"); self.emit("D=M"); self.emit("@R13"); self.emit("M=D");
-        self.emit("@R5"); self.emit("A=M"); self.emit("D=M"); self.emit("@R15"); self.emit("M=D");
-        self.emit("@__ds_char_ret"); self.emit("D=A"); self.emit("@R3"); self.emit("M=D");
-        self.emit("@__draw_char"); self.emit("0;JMP");
-        self.emit("(__ds_char_ret)");
-        // Pop R6, R5 (reverse order)
-        self.emit("@SP"); self.emit("M=M-1"); self.emit("A=M"); self.emit("D=M"); self.emit("@R6"); self.emit("M=D");
-        self.emit("@SP"); self.emit("M=M-1"); self.emit("A=M"); self.emit("D=M"); self.emit("@R5"); self.emit("M=D");
-        // Advance ptr and col
-        self.emit("@R5"); self.emit("M=M+1"); // ptr++
-        self.emit("@R6"); self.emit("M=M+1"); // col++
-        self.emit("@__ds_loop"); self.emit("0;JMP");
-        self.emit("(__ds_done)");
-        self.emit("@R4"); self.emit("A=M"); self.emit("0;JMP");
+        if need_clear_pixel {
+            // __clear_pixel: set pixel (R13=x, R14=y) to white. Return via R3.
+            self.emit("");
+            self.emit("// === Runtime: __clear_pixel ===");
+            self.emit("(__clear_pixel)");
+            self.emit("@R14"); self.emit("D=M");
+            self.emit("@R5");  self.emit("M=D");
+            for _ in 0..5 {
+                self.emit("@R5"); self.emit("D=M"); self.emit("M=D+M");
+            }
+            self.emit("@R13"); self.emit("D=M");
+            self.emit("@R7");  self.emit("M=D");
+            self.emit("@R6");  self.emit("M=0");
+            self.emit("(__cp_div16)");
+            self.emit("@R7"); self.emit("D=M");
+            self.emit("@16"); self.emit("D=D-A");
+            self.emit("@__cp_div16_done"); self.emit("D;JLT");
+            self.emit("@R7"); self.emit("M=D");
+            self.emit("@R6"); self.emit("M=M+1");
+            self.emit("@__cp_div16"); self.emit("0;JMP");
+            self.emit("(__cp_div16_done)");
+            self.emit("@R9"); self.emit("M=1");
+            self.emit("(__cp_shift)");
+            self.emit("@R7"); self.emit("D=M");
+            self.emit("@__cp_shift_done"); self.emit("D;JEQ");
+            self.emit("@R9"); self.emit("D=M"); self.emit("M=D+M");
+            self.emit("@R7"); self.emit("M=M-1");
+            self.emit("@__cp_shift"); self.emit("0;JMP");
+            self.emit("(__cp_shift_done)");
+            self.emit("@16384"); self.emit("D=A");
+            self.emit("@R5");    self.emit("D=D+M");
+            self.emit("@R6");    self.emit("D=D+M");
+            self.emit("@R8");    self.emit("M=D");
+            self.emit("@R9"); self.emit("D=!M");
+            self.emit("@R8"); self.emit("A=M"); self.emit("D=D&M");
+            self.emit("@R8"); self.emit("A=M"); self.emit("M=D");
+            self.emit("@R3"); self.emit("A=M"); self.emit("0;JMP");
+        }
+
+        if need_fill_screen {
+            // __fill_screen: fill all screen words with -1. Return via R3.
+            self.emit("");
+            self.emit("// === Runtime: __fill_screen ===");
+            self.emit("(__fill_screen)");
+            self.emit("@16384"); self.emit("D=A");
+            self.emit("@R13");   self.emit("M=D");
+            self.emit("(__fill_loop)");
+            self.emit("@24576"); self.emit("D=A");
+            self.emit("@R13");   self.emit("D=D-M");
+            self.emit("@__fill_done"); self.emit("D;JLE");
+            self.emit("@R13"); self.emit("A=M"); self.emit("M=-1");
+            self.emit("@R13"); self.emit("M=M+1");
+            self.emit("@__fill_loop"); self.emit("0;JMP");
+            self.emit("(__fill_done)");
+            self.emit("@R3"); self.emit("A=M"); self.emit("0;JMP");
+        }
+
+        if need_clear_screen {
+            // __clear_screen: fill all screen words with 0. Return via R3.
+            self.emit("");
+            self.emit("// === Runtime: __clear_screen ===");
+            self.emit("(__clear_screen)");
+            self.emit("@16384"); self.emit("D=A");
+            self.emit("@R13");   self.emit("M=D");
+            self.emit("(__clrscr_loop)");
+            self.emit("@24576"); self.emit("D=A");
+            self.emit("@R13");   self.emit("D=D-M");
+            self.emit("@__clrscr_done"); self.emit("D;JLE");
+            self.emit("@R13"); self.emit("A=M"); self.emit("M=0");
+            self.emit("@R13"); self.emit("M=M+1");
+            self.emit("@__clrscr_loop"); self.emit("0;JMP");
+            self.emit("(__clrscr_done)");
+            self.emit("@R3"); self.emit("A=M"); self.emit("0;JMP");
+        }
+
+        if need_draw_char {
+            // __draw_char: draw character at text cell.
+            // Inputs: R13=col (0-63), R14=row (0-31), R15=char_code. Return via R3.
+            self.emit("");
+            self.emit("// === Runtime: __draw_char ===");
+            self.emit("(__draw_char)");
+            self.emit("@R3"); self.emit("D=M"); self.emit("@R12"); self.emit("M=D");
+            self.emit("@R13"); self.emit("D=M"); self.emit("@R7"); self.emit("M=0"); self.emit("@R8"); self.emit("M=D");
+            self.emit("(__dc_div2)");
+            self.emit("@R8"); self.emit("D=M"); self.emit("@2"); self.emit("D=D-A");
+            self.emit("@__dc_div2_done"); self.emit("D;JLT");
+            self.emit("@R8"); self.emit("M=D");
+            self.emit("@R7"); self.emit("M=M+1");
+            self.emit("@__dc_div2"); self.emit("0;JMP");
+            self.emit("(__dc_div2_done)");
+            self.emit("@R14"); self.emit("D=M"); self.emit("@R9"); self.emit("M=D");
+            for _ in 0..8 {
+                self.emit("@R9"); self.emit("D=M"); self.emit("M=D+M");
+            }
+            self.emit(&format!("@{}", 16384)); self.emit("D=A");
+            self.emit("@R9"); self.emit("D=D+M");
+            self.emit("@R7"); self.emit("D=D+M");
+            self.emit("@R9"); self.emit("M=D");
+            self.emit("@R15"); self.emit("D=M");
+            self.emit("@32");  self.emit("D=D-A");
+            self.emit("@R6");  self.emit("M=D");
+            for _ in 0..3 {
+                self.emit("@R6"); self.emit("D=M"); self.emit("M=D+M");
+            }
+            self.emit(&format!("@{}", FONT_BASE)); self.emit("D=A");
+            self.emit("@R6"); self.emit("M=D+M");
+            self.emit("@R5"); self.emit("M=0");
+            self.emit("(__dc_row_loop)");
+            self.emit("@R5"); self.emit("D=M"); self.emit("@8"); self.emit("D=D-A");
+            self.emit("@__dc_row_done"); self.emit("D;JGE");
+            self.emit("@R6"); self.emit("A=M"); self.emit("D=M");
+            self.emit("@R10"); self.emit("M=D");
+            self.emit("@R8"); self.emit("D=M");
+            self.emit("@__dc_high"); self.emit("D;JNE");
+            self.emit("@255"); self.emit("D=!A");
+            self.emit("@R11"); self.emit("M=D");
+            self.emit("@R9"); self.emit("A=M"); self.emit("D=M");
+            self.emit("@R11"); self.emit("D=D&M");
+            self.emit("@R10"); self.emit("D=D|M");
+            self.emit("@R9"); self.emit("A=M"); self.emit("M=D");
+            self.emit("@__dc_row_cont"); self.emit("0;JMP");
+            self.emit("(__dc_high)");
+            self.emit("@R10"); self.emit("D=M"); self.emit("@R11"); self.emit("M=D");
+            for _ in 0..8 {
+                self.emit("@R11"); self.emit("D=M"); self.emit("M=D+M");
+            }
+            self.emit("@255"); self.emit("D=A");
+            self.emit("@R9"); self.emit("A=M"); self.emit("D=D&M");
+            self.emit("@R11"); self.emit("D=D|M");
+            self.emit("@R9"); self.emit("A=M"); self.emit("M=D");
+            self.emit("(__dc_row_cont)");
+            self.emit("@R6"); self.emit("M=M+1");
+            self.emit("@32"); self.emit("D=A"); self.emit("@R9"); self.emit("M=D+M");
+            self.emit("@R5"); self.emit("M=M+1");
+            self.emit("@__dc_row_loop"); self.emit("0;JMP");
+            self.emit("(__dc_row_done)");
+            self.emit("@R12"); self.emit("A=M"); self.emit("0;JMP");
+        }
+
+        if need_draw_string {
+            // __draw_string: draw null-terminated string at text cell.
+            // Inputs: R13=col, R14=row, R15=str_ptr. Return via R3.
+            self.emit("");
+            self.emit("// === Runtime: __draw_string ===");
+            self.emit("(__draw_string)");
+            self.emit("@R3"); self.emit("D=M"); self.emit("@R4"); self.emit("M=D");
+            self.emit("@R15"); self.emit("D=M"); self.emit("@R5"); self.emit("M=D");
+            self.emit("@R13"); self.emit("D=M"); self.emit("@R6"); self.emit("M=D");
+            self.emit("(__ds_loop)");
+            self.emit("@R5"); self.emit("A=M"); self.emit("D=M");
+            self.emit("@__ds_done"); self.emit("D;JEQ");
+            self.emit("@R5"); self.emit("D=M"); self.emit("@SP"); self.emit("A=M"); self.emit("M=D"); self.emit("@SP"); self.emit("M=M+1");
+            self.emit("@R6"); self.emit("D=M"); self.emit("@SP"); self.emit("A=M"); self.emit("M=D"); self.emit("@SP"); self.emit("M=M+1");
+            self.emit("@R6"); self.emit("D=M"); self.emit("@R13"); self.emit("M=D");
+            self.emit("@R5"); self.emit("A=M"); self.emit("D=M"); self.emit("@R15"); self.emit("M=D");
+            self.emit("@__ds_char_ret"); self.emit("D=A"); self.emit("@R3"); self.emit("M=D");
+            self.emit("@__draw_char"); self.emit("0;JMP");
+            self.emit("(__ds_char_ret)");
+            self.emit("@SP"); self.emit("M=M-1"); self.emit("A=M"); self.emit("D=M"); self.emit("@R6"); self.emit("M=D");
+            self.emit("@SP"); self.emit("M=M-1"); self.emit("A=M"); self.emit("D=M"); self.emit("@R5"); self.emit("M=D");
+            self.emit("@R5"); self.emit("M=M+1");
+            self.emit("@R6"); self.emit("M=M+1");
+            self.emit("@__ds_loop"); self.emit("0;JMP");
+            self.emit("(__ds_done)");
+            self.emit("@R4"); self.emit("A=M"); self.emit("0;JMP");
+        }
     }
 }
 
-pub fn generate(sema: SemaResult) -> Result<String, CodegenError> {
-    let mut g = Gen::new(sema.func_sigs.clone(), sema.string_map.clone(), sema.struct_defs.clone());
+// ── Pre-scan helpers (call graph + builtin usage analysis) ───────────────────
 
-    // Bootstrap
+fn collect_calls_from_stmts(stmts: &[Stmt]) -> HashSet<String> {
+    let mut calls = HashSet::new();
+    for s in stmts { collect_calls_stmt(s, &mut calls); }
+    calls
+}
+
+fn collect_calls_stmt(s: &Stmt, calls: &mut HashSet<String>) {
+    match s {
+        Stmt::Expr(e)           => collect_calls_expr(e, calls),
+        Stmt::Return(Some(e))   => collect_calls_expr(e, calls),
+        Stmt::Decl(_, _, Some(e)) => collect_calls_expr(e, calls),
+        Stmt::Block(ss)         => ss.iter().for_each(|s| collect_calls_stmt(s, calls)),
+        Stmt::If(c, t, e) => {
+            collect_calls_expr(c, calls);
+            collect_calls_stmt(t, calls);
+            if let Some(e) = e { collect_calls_stmt(e, calls); }
+        }
+        Stmt::While(c, b) => {
+            collect_calls_expr(c, calls);
+            collect_calls_stmt(b, calls);
+        }
+        Stmt::For { init, cond, incr, body } => {
+            if let Some(s) = init { collect_calls_stmt(s, calls); }
+            if let Some(e) = cond { collect_calls_expr(e, calls); }
+            if let Some(e) = incr { collect_calls_expr(e, calls); }
+            collect_calls_stmt(body, calls);
+        }
+        _ => {}
+    }
+}
+
+fn collect_calls_expr(e: &Expr, calls: &mut HashSet<String>) {
+    match e {
+        Expr::Call(name, args) => {
+            calls.insert(name.clone());
+            for a in args { collect_calls_expr(a, calls); }
+        }
+        Expr::BinOp(_, l, r) => { collect_calls_expr(l, calls); collect_calls_expr(r, calls); }
+        Expr::UnOp(_, inner)  => collect_calls_expr(inner, calls),
+        Expr::Index(a, b)     => { collect_calls_expr(a, calls); collect_calls_expr(b, calls); }
+        Expr::Member(b, _)    => collect_calls_expr(b, calls),
+        _ => {}
+    }
+}
+
+fn scan_builtins_from_stmts(stmts: &[Stmt], used: &mut HashSet<BuiltinKind>) {
+    for s in stmts { scan_builtins_stmt(s, used); }
+}
+
+fn scan_builtins_stmt(s: &Stmt, used: &mut HashSet<BuiltinKind>) {
+    match s {
+        Stmt::Expr(e)           => scan_builtins_expr(e, used),
+        Stmt::Return(Some(e))   => scan_builtins_expr(e, used),
+        Stmt::Decl(_, _, Some(e)) => scan_builtins_expr(e, used),
+        Stmt::Block(ss)         => ss.iter().for_each(|s| scan_builtins_stmt(s, used)),
+        Stmt::If(c, t, e) => {
+            scan_builtins_expr(c, used);
+            scan_builtins_stmt(t, used);
+            if let Some(e) = e { scan_builtins_stmt(e, used); }
+        }
+        Stmt::While(c, b) => {
+            scan_builtins_expr(c, used);
+            scan_builtins_stmt(b, used);
+        }
+        Stmt::For { init, cond, incr, body } => {
+            if let Some(s) = init { scan_builtins_stmt(s, used); }
+            if let Some(e) = cond { scan_builtins_expr(e, used); }
+            if let Some(e) = incr { scan_builtins_expr(e, used); }
+            scan_builtins_stmt(body, used);
+        }
+        _ => {}
+    }
+}
+
+fn scan_builtins_expr(e: &Expr, used: &mut HashSet<BuiltinKind>) {
+    match e {
+        Expr::Call(name, args) => {
+            match name.as_str() {
+                "puts"                   => { used.insert(BuiltinKind::Puts); }
+                "strlen"                 => { used.insert(BuiltinKind::Strlen); }
+                "draw_pixel"             => { used.insert(BuiltinKind::DrawPixel); }
+                "clear_pixel"            => { used.insert(BuiltinKind::ClearPixel); }
+                "fill_screen"            => { used.insert(BuiltinKind::FillScreen); }
+                "clear_screen"           => { used.insert(BuiltinKind::ClearScreen); }
+                "draw_char"              => { used.insert(BuiltinKind::DrawChar); }
+                "draw_string" | "print_at" => {
+                    used.insert(BuiltinKind::DrawString);
+                    used.insert(BuiltinKind::DrawChar); // transitive dependency
+                }
+                _ => {}
+            }
+            for a in args { scan_builtins_expr(a, used); }
+        }
+        Expr::BinOp(op, l, r) => {
+            match op {
+                BinOp::Mul           => { used.insert(BuiltinKind::Mul); }
+                BinOp::Div | BinOp::Mod => { used.insert(BuiltinKind::Div); }
+                _ => {}
+            }
+            scan_builtins_expr(l, used);
+            scan_builtins_expr(r, used);
+        }
+        Expr::UnOp(_, inner) => scan_builtins_expr(inner, used),
+        Expr::Index(a, b)    => { scan_builtins_expr(a, used); scan_builtins_expr(b, used); }
+        Expr::Member(b, _)   => scan_builtins_expr(b, used),
+        _ => {}
+    }
+}
+
+// ── Entry point ──────────────────────────────────────────────────────────────
+
+pub fn generate(sema: SemaResult) -> Result<CompiledProgram, CodegenError> {
+    // ── Phase 1: Build call graph; find reachable user functions from main ──
+    let func_names: HashSet<String> = sema.funcs.iter().map(|f| f.name.clone()).collect();
+    let mut call_graph: HashMap<String, HashSet<String>> = HashMap::new();
+    for f in &sema.funcs {
+        let all_calls = collect_calls_from_stmts(&f.body);
+        let user_calls: HashSet<String> = all_calls.into_iter()
+            .filter(|name| func_names.contains(name))
+            .collect();
+        call_graph.insert(f.name.clone(), user_calls);
+    }
+    let mut reachable: HashSet<String> = HashSet::new();
+    let mut queue = vec!["main".to_string()];
+    while let Some(name) = queue.pop() {
+        if reachable.contains(&name) { continue; }
+        reachable.insert(name.clone());
+        if let Some(callees) = call_graph.get(&name) {
+            for callee in callees {
+                if !reachable.contains(callee) { queue.push(callee.clone()); }
+            }
+        }
+    }
+
+    // ── Phase 2: Determine which runtime helpers are needed ──────────────────
+    let mut used_builtins: HashSet<BuiltinKind> = HashSet::new();
+    for f in &sema.funcs {
+        if reachable.contains(&f.name) {
+            scan_builtins_from_stmts(&f.body, &mut used_builtins);
+        }
+    }
+    // Transitive: draw_string always requires draw_char
+    if used_builtins.contains(&BuiltinKind::DrawString) {
+        used_builtins.insert(BuiltinKind::DrawChar);
+    }
+
+    // ── Phase 3: Generate code ───────────────────────────────────────────────
+    let mut g = Gen::new(sema.string_map.clone(), sema.struct_defs.clone(), used_builtins.clone());
+
     g.emit("// Bootstrap");
     g.emit("@256");
     g.emit("D=A");
     g.emit("@SP");
     g.emit("M=D");
+    // Marker: output module inserts data-init code here for asm/hack formats
+    g.emit("// __DATA_INIT_HERE__");
 
-    // Initialize global variables BEFORE calling main (so main sees them)
-    if !sema.globals.is_empty() {
-        g.emit("// Global variable initialization");
-        for (name, addr, _ty, init_val) in &sema.globals {
-            if let Some(val) = init_val {
-                g.emit(&format!("// init global {} at {}", name, addr));
-                if *val == 0 {
-                    // zero is the default; skip explicit write
-                } else if *val == 1 {
-                    g.emit("D=1");
-                    g.emit(&format!("@{}", addr));
-                    g.emit("M=D");
-                } else if *val == -1 {
-                    g.emit("D=-1");
-                    g.emit(&format!("@{}", addr));
-                    g.emit("M=D");
-                } else if *val > 0 {
-                    g.emit(&format!("@{}", val));
-                    g.emit("D=A");
-                    g.emit(&format!("@{}", addr));
-                    g.emit("M=D");
-                } else {
-                    g.emit(&format!("@{}", -val));
-                    g.emit("D=-A");
-                    g.emit(&format!("@{}", addr));
-                    g.emit("M=D");
-                }
-            }
-        }
-    }
-
-    // Initialize string literals in RAM BEFORE calling main
-    if !sema.string_literals.is_empty() {
-        g.emit("// String literal initialization");
-        for (addr, chars) in &sema.string_literals {
-            for (i, &ch) in chars.iter().enumerate() {
-                if ch == 0 { continue; } // null terminator: RAM is already 0
-                g.emit(&format!("@{}", ch));
-                g.emit("D=A");
-                g.emit(&format!("@{}", addr + i));
-                g.emit("M=D");
-            }
-            // Null terminator slot (addr+len) is already 0 (zero-init RAM)
-        }
-    }
-
-    // Initialize font table at FONT_BASE (bit-reversed for Hack LSB-leftmost screen layout)
-    g.emit("// Font table initialization");
-    for ch_idx in 0..96usize {
-        for row in 0..8usize {
-            let byte = FONT_8X8[ch_idx][row];
-            let reversed = byte.reverse_bits(); // MSB-first → LSB-first for Hack screen
-            if reversed == 0 { continue; }
-            let addr = FONT_BASE + ch_idx * 8 + row;
-            g.emit(&format!("@{}", reversed));
-            g.emit("D=A");
-            g.emit(&format!("@{}", addr));
-            g.emit("M=D");
-        }
-    }
-
-    // Call main (using call convention)
+    // Call main (Jack VM calling convention)
     let id = g.label();
     let ret_lbl = format!("main$ret_{}", id);
     g.emit(&format!("@{}", ret_lbl));
@@ -1862,7 +1958,6 @@ pub fn generate(sema: SemaResult) -> Result<String, CodegenError> {
     g.emit("M=D");
     g.emit("@SP");
     g.emit("M=M+1");
-    // push LCL=0, ARG=0, THIS=0, THAT=0
     for reg in &["LCL", "ARG", "THIS", "THAT"] {
         g.emit(&format!("@{}", reg));
         g.emit("D=M");
@@ -1872,14 +1967,12 @@ pub fn generate(sema: SemaResult) -> Result<String, CodegenError> {
         g.emit("@SP");
         g.emit("M=M+1");
     }
-    // ARG = SP - 0 - 5
     g.emit("@SP");
     g.emit("D=M");
     g.emit("@5");
     g.emit("D=D-A");
     g.emit("@ARG");
     g.emit("M=D");
-    // LCL = SP
     g.emit("@SP");
     g.emit("D=M");
     g.emit("@LCL");
@@ -1887,21 +1980,58 @@ pub fn generate(sema: SemaResult) -> Result<String, CodegenError> {
     g.emit("@main");
     g.emit("0;JMP");
     g.emit(&format!("({})", ret_lbl));
-    // Infinite loop after main returns
     g.emit("(__end)");
     g.emit("@__end");
     g.emit("0;JMP");
     g.emit("");
 
-    // Generate functions
+    // Emit only reachable user-defined functions
     for f in &sema.funcs {
-        g.emit("");
-        g.gen_func(f)?;
+        if reachable.contains(&f.name) {
+            g.emit("");
+            g.gen_func(f)?;
+        }
     }
 
-    // Runtime subroutines
+    // Runtime subroutines (gated on used_builtins)
     g.emit_runtime();
 
-    Ok(g.out.join("\n") + "\n")
+    let asm = g.out.join("\n") + "\n";
+
+    // ── Phase 4: Collect DataInit entries ────────────────────────────────────
+    let mut data: Vec<DataInit> = Vec::new();
+
+    // Non-zero global variable initialisations
+    for (_name, addr, _ty, init_val) in &sema.globals {
+        if let Some(val) = init_val {
+            if *val != 0 {
+                data.push(DataInit { address: *addr as u16, value: *val as i16 });
+            }
+        }
+    }
+
+    // String literal content (null terminators are zero so we skip them)
+    for (addr, chars) in &sema.string_literals {
+        for (i, &ch) in chars.iter().enumerate() {
+            if ch != 0 {
+                data.push(DataInit { address: (*addr + i) as u16, value: ch });
+            }
+        }
+    }
+
+    // Font table — only if draw_char or draw_string is used
+    if used_builtins.contains(&BuiltinKind::DrawChar) {
+        for ch_idx in 0..96usize {
+            for row in 0..8usize {
+                let byte = FONT_8X8[ch_idx][row];
+                let reversed = byte.reverse_bits();
+                if reversed == 0 { continue; }
+                let addr = (FONT_BASE + ch_idx * 8 + row) as u16;
+                data.push(DataInit { address: addr, value: reversed as i16 });
+            }
+        }
+    }
+
+    Ok(CompiledProgram { asm, data })
 }
 
