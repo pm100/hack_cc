@@ -22,9 +22,9 @@ struct Cli {
     /// Output file (default: derived from input name)
     #[arg(short, long)]
     output: Option<PathBuf>,
-    /// Output format
-    #[arg(short, long, value_enum, default_value = "asm")]
-    format: Format,
+    /// Output format (inferred from -o extension if not specified)
+    #[arg(short, long, value_enum)]
+    format: Option<Format>,
 }
 
 fn main() {
@@ -40,7 +40,20 @@ fn main() {
         std::process::exit(1);
     });
 
-    let fmt = match cli.format {
+    // Infer format: explicit flag > output extension > default asm
+    let fmt_enum = cli.format.or_else(|| {
+        cli.output.as_ref().and_then(|p| {
+            match p.extension().and_then(|e| e.to_str()) {
+                Some("hackem") => Some(Format::Hackem),
+                Some("hack")   => Some(Format::Hack),
+                Some("tst")    => Some(Format::Tst),
+                Some("asm")    => Some(Format::Asm),
+                _              => None,
+            }
+        })
+    }).unwrap_or(Format::Asm);
+
+    let fmt = match fmt_enum {
         Format::Asm    => OutputFormat::Asm,
         Format::Hackem => OutputFormat::Hackem,
         Format::Hack   => OutputFormat::Hack,
