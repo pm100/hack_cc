@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
-use crate::parser::{Program, FuncDef, Stmt, Expr, BinOp, Type};
+use crate::parser::{Program, FuncDef, Stmt, Expr, BinOp, Type, SwitchArm, SwitchLabel};
 
 #[derive(Debug, Error, Clone)]
 #[error("semantic error: {0}")]
@@ -53,7 +53,7 @@ pub struct SemaResult {
 pub fn type_size(ty: &Type, defs: &HashMap<String, Vec<(String, Type)>>) -> usize {
     match ty {
         Type::Void => 0,
-        Type::Int | Type::Char | Type::Ptr(_) => 1,
+        Type::Int | Type::Char | Type::Ptr(_) | Type::Long => 1,
         Type::Array(base, n) => type_size(base, defs) * n,
         Type::Struct(name) => {
             defs.get(name)
@@ -63,7 +63,19 @@ pub fn type_size(ty: &Type, defs: &HashMap<String, Vec<(String, Type)>>) -> usiz
     }
 }
 
+/// Analyze a complete program (all functions must be defined or in KNOWN_EXTERNALS).
 pub fn analyze(prog: Program) -> Result<SemaResult, SemaError> {
+    analyze_impl(prog, &[])
+}
+
+/// Analyze a single translation unit for separate compilation.
+/// `user_externals` lists forward-declared functions (from headers) that will be
+/// provided by other object files at link time.
+pub fn analyze_for_object_file(prog: Program, user_externals: &[&str]) -> Result<SemaResult, SemaError> {
+    analyze_impl(prog, user_externals)
+}
+
+fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, SemaError> {
     // Build struct definition map: name -> [(field_name, field_type)]
     let mut struct_defs: HashMap<String, Vec<(String, Type)>> = HashMap::new();
     for sd in &prog.struct_defs {
@@ -102,22 +114,48 @@ pub fn analyze(prog: Program) -> Result<SemaResult, SemaError> {
         }
     }
     for f in &prog.funcs {
+        if f.is_decl { continue; }
         for stmt in &f.body {
             collect_strings_stmt(stmt, &mut string_map, &mut string_literals, &mut next_global_addr);
         }
     }
 
-    // Build function signature table
+    // Build function signature table (include declarations so calls type-check)
     let mut func_sigs: HashMap<String, (Type, usize)> = HashMap::new();
+    // Also track which names have actual definitions (not just forward decls)
+    let mut defined_funcs: HashSet<String> = HashSet::new();
     for f in &prog.funcs {
         func_sigs.insert(f.name.clone(), (f.ret_ty.clone(), f.params.len()));
+        if !f.is_decl {
+            defined_funcs.insert(f.name.clone());
+        }
     }
 
-    // Analyze each function
+    // Analyze each function (skip forward declarations — they have no body)
     let mut funcs_out = Vec::new();
     for f in prog.funcs {
+        if f.is_decl { continue; }
         let af = analyze_func(f, &global_map, &struct_defs)?;
         funcs_out.push(af);
+    }
+
+    // Verify that all calls target defined functions, known linker-provided externals,
+    // or inline codegen builtins.
+    // Any function in this list is either handled inline by codegen or resolvable by the linker.
+    const KNOWN_EXTERNALS: &[&str] = &[
+        // Inline codegen builtins (no library needed)
+        "abs", "min", "max", "read_key",
+        // I/O builtins
+        "putchar", "puts", "strlen",
+        "draw_pixel", "clear_pixel", "fill_screen", "clear_screen",
+        "draw_char", "draw_string", "print_at",
+        // Runtime library (resolved by linker from src/runtime/)
+        "strcpy", "strcmp", "strcat", "itoa",
+        "draw_line", "draw_rect", "fill_rect",
+        "malloc", "free", "sys_wait",
+    ];
+    for af in &funcs_out {
+        check_calls_defined_ext(&af.body, &defined_funcs, KNOWN_EXTERNALS, user_externals)?;
     }
 
     Ok(SemaResult { globals: globals_out, funcs: funcs_out, func_sigs, string_literals, string_map, struct_defs })
@@ -127,10 +165,179 @@ fn eval_const(expr: &Expr) -> Result<i32, SemaError> {
     match expr {
         Expr::Num(n) => Ok(*n),
         Expr::UnOp(crate::parser::UnOp::Neg, e) => Ok(-eval_const(e)?),
+        Expr::Cast(_, e) => eval_const(e),
         Expr::StringLit(_) => Err(SemaError::new("string literal cannot be used as integer constant initializer")),
         _ => Err(SemaError::new("global initializer must be a constant integer")),
     }
 }
+
+/// Verify that all Call expressions in `stmts` resolve to a defined function or known builtin.
+/// Forward-declared-only functions cannot be linked on the Hack target (no linker).
+fn check_calls_defined(stmts: &[Stmt], defined: &HashSet<String>, builtins: &[&str]) -> Result<(), SemaError> {
+    for stmt in stmts {
+        check_calls_stmt(stmt, defined, builtins)?;
+    }
+    Ok(())
+}
+
+fn check_calls_defined_ext(
+    stmts: &[Stmt],
+    defined: &HashSet<String>,
+    builtins: &[&str],
+    externals: &[&str],
+) -> Result<(), SemaError> {
+    for stmt in stmts {
+        check_calls_stmt_ext(stmt, defined, builtins, externals)?;
+    }
+    Ok(())
+}
+
+fn check_calls_stmt(stmt: &Stmt, defined: &HashSet<String>, builtins: &[&str]) -> Result<(), SemaError> {
+    match stmt {
+        Stmt::Expr(e) => check_calls_expr(e, defined, builtins)?,
+        Stmt::Return(Some(e)) => check_calls_expr(e, defined, builtins)?,
+        Stmt::Decl(_, _, Some(e)) => check_calls_expr(e, defined, builtins)?,
+        Stmt::If(c, t, el) => {
+            check_calls_expr(c, defined, builtins)?;
+            check_calls_stmt(t, defined, builtins)?;
+            if let Some(e) = el { check_calls_stmt(e, defined, builtins)?; }
+        }
+        Stmt::While(c, b) => {
+            check_calls_expr(c, defined, builtins)?;
+            check_calls_stmt(b, defined, builtins)?;
+        }
+        Stmt::DoWhile(b, c) => {
+            check_calls_stmt(b, defined, builtins)?;
+            check_calls_expr(c, defined, builtins)?;
+        }
+        Stmt::For { init, cond, incr, body } => {
+            if let Some(s) = init { check_calls_stmt(s, defined, builtins)?; }
+            if let Some(e) = cond { check_calls_expr(e, defined, builtins)?; }
+            if let Some(e) = incr { check_calls_expr(e, defined, builtins)?; }
+            check_calls_stmt(body, defined, builtins)?;
+        }
+        Stmt::Block(stmts) => check_calls_defined(stmts, defined, builtins)?,
+        Stmt::Switch { expr, arms } => {
+            check_calls_expr(expr, defined, builtins)?;
+            for arm in arms {
+                for s in &arm.stmts { check_calls_stmt(s, defined, builtins)?; }
+            }
+        }
+        Stmt::Break | Stmt::Continue => {}
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_calls_expr(expr: &Expr, defined: &HashSet<String>, builtins: &[&str]) -> Result<(), SemaError> {
+    match expr {
+        Expr::Call(name, args) => {
+            if !defined.contains(name) && !builtins.contains(&name.as_str()) {
+                return Err(SemaError::new(format!(
+                    "call to '{}': function has no definition (external functions are not supported)",
+                    name
+                )));
+            }
+            for a in args { check_calls_expr(a, defined, builtins)?; }
+        }
+        Expr::BinOp(_, l, r) => {
+            check_calls_expr(l, defined, builtins)?;
+            check_calls_expr(r, defined, builtins)?;
+        }
+        Expr::UnOp(_, e) => check_calls_expr(e, defined, builtins)?,
+        Expr::Index(a, b) => {
+            check_calls_expr(a, defined, builtins)?;
+            check_calls_expr(b, defined, builtins)?;
+        }
+        Expr::Member(base, _) => check_calls_expr(base, defined, builtins)?,
+        Expr::Ternary(c, t, e) => {
+            check_calls_expr(c, defined, builtins)?;
+            check_calls_expr(t, defined, builtins)?;
+            check_calls_expr(e, defined, builtins)?;
+        }
+        Expr::Cast(_, e) => check_calls_expr(e, defined, builtins)?,
+        Expr::PostInc(e) | Expr::PostDec(e) => check_calls_expr(e, defined, builtins)?,
+        Expr::InitList(items) => {
+            for item in items { check_calls_expr(item, defined, builtins)?; }
+        }
+        Expr::Num(_) | Expr::Ident(_) | Expr::StringLit(_) | Expr::Sizeof(_) => {}
+    }
+    Ok(())
+}
+
+fn check_calls_stmt_ext(stmt: &Stmt, defined: &HashSet<String>, builtins: &[&str], externals: &[&str]) -> Result<(), SemaError> {
+    match stmt {
+        Stmt::Expr(e) => check_calls_expr_ext(e, defined, builtins, externals)?,
+        Stmt::Return(Some(e)) => check_calls_expr_ext(e, defined, builtins, externals)?,
+        Stmt::Decl(_, _, Some(e)) => check_calls_expr_ext(e, defined, builtins, externals)?,
+        Stmt::If(c, t, el) => {
+            check_calls_expr_ext(c, defined, builtins, externals)?;
+            check_calls_stmt_ext(t, defined, builtins, externals)?;
+            if let Some(e) = el { check_calls_stmt_ext(e, defined, builtins, externals)?; }
+        }
+        Stmt::While(c, b) => {
+            check_calls_expr_ext(c, defined, builtins, externals)?;
+            check_calls_stmt_ext(b, defined, builtins, externals)?;
+        }
+        Stmt::DoWhile(b, c) => {
+            check_calls_stmt_ext(b, defined, builtins, externals)?;
+            check_calls_expr_ext(c, defined, builtins, externals)?;
+        }
+        Stmt::For { init, cond, incr, body } => {
+            if let Some(s) = init { check_calls_stmt_ext(s, defined, builtins, externals)?; }
+            if let Some(e) = cond { check_calls_expr_ext(e, defined, builtins, externals)?; }
+            if let Some(e) = incr { check_calls_expr_ext(e, defined, builtins, externals)?; }
+            check_calls_stmt_ext(body, defined, builtins, externals)?;
+        }
+        Stmt::Block(stmts) => check_calls_defined_ext(stmts, defined, builtins, externals)?,
+        Stmt::Switch { expr, arms } => {
+            check_calls_expr_ext(expr, defined, builtins, externals)?;
+            for arm in arms {
+                for s in &arm.stmts { check_calls_stmt_ext(s, defined, builtins, externals)?; }
+            }
+        }
+        Stmt::Break | Stmt::Continue => {}
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_calls_expr_ext(expr: &Expr, defined: &HashSet<String>, builtins: &[&str], externals: &[&str]) -> Result<(), SemaError> {
+    match expr {
+        Expr::Call(name, args) => {
+            if !defined.contains(name) && !builtins.contains(&name.as_str()) && !externals.contains(&name.as_str()) {
+                return Err(SemaError::new(format!(
+                    "call to '{}': function has no definition (external functions are not supported)",
+                    name
+                )));
+            }
+            for a in args { check_calls_expr_ext(a, defined, builtins, externals)?; }
+        }
+        Expr::BinOp(_, l, r) => {
+            check_calls_expr_ext(l, defined, builtins, externals)?;
+            check_calls_expr_ext(r, defined, builtins, externals)?;
+        }
+        Expr::UnOp(_, e) => check_calls_expr_ext(e, defined, builtins, externals)?,
+        Expr::Index(a, b) => {
+            check_calls_expr_ext(a, defined, builtins, externals)?;
+            check_calls_expr_ext(b, defined, builtins, externals)?;
+        }
+        Expr::Member(base, _) => check_calls_expr_ext(base, defined, builtins, externals)?,
+        Expr::Ternary(c, t, e) => {
+            check_calls_expr_ext(c, defined, builtins, externals)?;
+            check_calls_expr_ext(t, defined, builtins, externals)?;
+            check_calls_expr_ext(e, defined, builtins, externals)?;
+        }
+        Expr::Cast(_, e) => check_calls_expr_ext(e, defined, builtins, externals)?,
+        Expr::PostInc(e) | Expr::PostDec(e) => check_calls_expr_ext(e, defined, builtins, externals)?,
+        Expr::InitList(items) => {
+            for item in items { check_calls_expr_ext(item, defined, builtins, externals)?; }
+        }
+        Expr::Num(_) | Expr::Ident(_) | Expr::StringLit(_) | Expr::Sizeof(_) => {}
+    }
+    Ok(())
+}
+
 
 fn analyze_func(
     mut f: FuncDef,
@@ -192,10 +399,7 @@ fn collect_locals_stmt(
             let size = type_size(ty, struct_defs).max(1);
             let idx = *next_idx;
             *next_idx += size;
-            vars.insert(name.clone(), VarInfo {
-                ty: ty.clone(),
-                storage: VarStorage::Local(idx),
-            });
+            vars.insert(name.clone(), VarInfo { ty: ty.clone(), storage: VarStorage::Local(idx) });
         }
         Stmt::Block(stmts) => collect_locals(stmts, vars, next_idx, struct_defs)?,
         Stmt::If(_, then, els) => {
@@ -203,11 +407,17 @@ fn collect_locals_stmt(
             if let Some(e) = els { collect_locals_stmt(e, vars, next_idx, struct_defs)?; }
         }
         Stmt::While(_, body) => collect_locals_stmt(body, vars, next_idx, struct_defs)?,
+        Stmt::DoWhile(body, _) => collect_locals_stmt(body, vars, next_idx, struct_defs)?,
         Stmt::For { init, body, .. } => {
             if let Some(s) = init { collect_locals_stmt(s, vars, next_idx, struct_defs)?; }
             collect_locals_stmt(body, vars, next_idx, struct_defs)?;
         }
-        Stmt::Return(_) | Stmt::Expr(_) => {}
+        Stmt::Switch { arms, .. } => {
+            for arm in arms {
+                collect_locals(&arm.stmts, vars, next_idx, struct_defs)?;
+            }
+        }
+        Stmt::Return(_) | Stmt::Expr(_) | Stmt::Break | Stmt::Continue => {}
     }
     Ok(())
 }
@@ -230,6 +440,14 @@ pub fn desugar_compound(op: &BinOp, lhs: Expr, rhs: Expr) -> Expr {
     let arith_op = match op {
         BinOp::AddAssign => BinOp::Add,
         BinOp::SubAssign => BinOp::Sub,
+        BinOp::MulAssign => BinOp::Mul,
+        BinOp::DivAssign => BinOp::Div,
+        BinOp::ModAssign => BinOp::Mod,
+        BinOp::AndAssign => BinOp::BitAnd,
+        BinOp::OrAssign  => BinOp::BitOr,
+        BinOp::XorAssign => BinOp::BitXor,
+        BinOp::ShlAssign => BinOp::Shl,
+        BinOp::ShrAssign => BinOp::Shr,
         _ => unreachable!(),
     };
     Expr::BinOp(
@@ -277,6 +495,16 @@ fn collect_strings_expr(
             collect_strings_expr(b, map, lits, next_addr);
         }
         Expr::Member(base, _) => collect_strings_expr(base, map, lits, next_addr),
+        Expr::Ternary(c, t, e) => {
+            collect_strings_expr(c, map, lits, next_addr);
+            collect_strings_expr(t, map, lits, next_addr);
+            collect_strings_expr(e, map, lits, next_addr);
+        }
+        Expr::Cast(_, e) => collect_strings_expr(e, map, lits, next_addr),
+        Expr::PostInc(e) | Expr::PostDec(e) => collect_strings_expr(e, map, lits, next_addr),
+        Expr::InitList(items) => {
+            for item in items { collect_strings_expr(item, map, lits, next_addr); }
+        }
         Expr::Num(_) | Expr::Ident(_) | Expr::Sizeof(_) => {}
     }
 }
@@ -303,12 +531,23 @@ fn collect_strings_stmt(
             collect_strings_expr(cond, map, lits, next_addr);
             collect_strings_stmt(body, map, lits, next_addr);
         }
+        Stmt::DoWhile(body, cond) => {
+            collect_strings_stmt(body, map, lits, next_addr);
+            collect_strings_expr(cond, map, lits, next_addr);
+        }
         Stmt::For { init, cond, incr, body } => {
             if let Some(s) = init { collect_strings_stmt(s, map, lits, next_addr); }
             if let Some(e) = cond { collect_strings_expr(e, map, lits, next_addr); }
             if let Some(e) = incr { collect_strings_expr(e, map, lits, next_addr); }
             collect_strings_stmt(body, map, lits, next_addr);
         }
+        Stmt::Switch { expr, arms } => {
+            collect_strings_expr(expr, map, lits, next_addr);
+            for arm in arms {
+                for s in &arm.stmts { collect_strings_stmt(s, map, lits, next_addr); }
+            }
+        }
+        Stmt::Break | Stmt::Continue => {}
         _ => {}
     }
 }
@@ -348,7 +587,6 @@ fn alpha_rename_stmt(
 ) {
     match stmt {
         Stmt::Decl(_, name, init) => {
-            // Determine unique name (first occurrence keeps original name).
             let count = counters.entry(name.clone()).or_insert(0);
             let new_name = if *count == 0 {
                 name.clone()
@@ -356,8 +594,6 @@ fn alpha_rename_stmt(
                 format!("{}${}", name, count)
             };
             *count += 1;
-            // Add to current scope BEFORE renaming init so the initializer can
-            // reference the new variable (C11 §6.2.1 — scope begins after declarator).
             scopes.last_mut().unwrap().insert(name.clone(), new_name.clone());
             *name = new_name;
             if let Some(e) = init {
@@ -370,7 +606,6 @@ fn alpha_rename_stmt(
             scopes.pop();
         }
         Stmt::For { init, cond, incr, body } => {
-            // For-loop init, cond, incr, and body share one new scope.
             scopes.push(HashMap::new());
             if let Some(s) = init { alpha_rename_stmt(s, counters, scopes); }
             if let Some(e) = cond { alpha_rename_expr(e, scopes); }
@@ -387,24 +622,37 @@ fn alpha_rename_stmt(
             alpha_rename_expr(cond, scopes);
             alpha_rename_stmt(body, counters, scopes);
         }
+        Stmt::DoWhile(body, cond) => {
+            alpha_rename_stmt(body, counters, scopes);
+            alpha_rename_expr(cond, scopes);
+        }
         Stmt::Return(e) => {
             if let Some(e) = e { alpha_rename_expr(e, scopes); }
         }
         Stmt::Expr(e) => alpha_rename_expr(e, scopes),
+        Stmt::Break | Stmt::Continue => {}
+        Stmt::Switch { expr, arms } => {
+            alpha_rename_expr(expr, scopes);
+            for arm in arms {
+                scopes.push(HashMap::new());
+                for stmt in &mut arm.stmts {
+                    alpha_rename_stmt(stmt, counters, scopes);
+                }
+                scopes.pop();
+            }
+        }
     }
 }
 
 fn alpha_rename_expr(expr: &mut Expr, scopes: &[HashMap<String, String>]) {
     match expr {
         Expr::Ident(name) => {
-            // Look up innermost scope first.
             for scope in scopes.iter().rev() {
                 if let Some(renamed) = scope.get(name.as_str()) {
                     *name = renamed.clone();
                     return;
                 }
             }
-            // Not found: global or function name — leave unchanged.
         }
         Expr::BinOp(_, l, r) => {
             alpha_rename_expr(l, scopes);
@@ -419,6 +667,16 @@ fn alpha_rename_expr(expr: &mut Expr, scopes: &[HashMap<String, String>]) {
             alpha_rename_expr(b, scopes);
         }
         Expr::Member(base, _) => alpha_rename_expr(base, scopes),
+        Expr::Ternary(c, t, e) => {
+            alpha_rename_expr(c, scopes);
+            alpha_rename_expr(t, scopes);
+            alpha_rename_expr(e, scopes);
+        }
+        Expr::Cast(_, e) => alpha_rename_expr(e, scopes),
+        Expr::PostInc(e) | Expr::PostDec(e) => alpha_rename_expr(e, scopes),
+        Expr::InitList(items) => {
+            for item in items { alpha_rename_expr(item, scopes); }
+        }
         Expr::Num(_) | Expr::StringLit(_) | Expr::Sizeof(_) => {}
     }
 }

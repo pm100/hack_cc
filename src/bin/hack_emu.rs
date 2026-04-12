@@ -815,14 +815,18 @@ mod tests {
             "int main() { draw_char(0, 0, 65); return 0; }",
             4_000_000,
         );
-        let a_base = FONT_BASE + 33 * 8; // 'A' font data starts here
-        assert_eq!(ram[a_base]     as u16, 0x18u16, "row0 of 'A'");
-        assert_eq!(ram[a_base + 1] as u16, 0x3Cu16, "row1 of 'A'");
-        assert_eq!(ram[a_base + 4] as u16, 0x7Eu16, "row4 of 'A'");
-        assert_eq!(ram[a_base + 7] as u16, 0x00u16, "row7 of 'A' (blank)");
+        // 'A' is char index 33 (65-32), 11 rows per char in Jack OS 8×11 font
+        // FONT_8X11[33] = [12,30,51,51,63,51,51,51,51,0,0]
+        // Jack OS font uses bit-0=leftmost, matching Hack screen — stored as-is.
+        let a_base = FONT_BASE + 33 * 11;
+        assert_eq!(ram[a_base]     as u16, 12u16,  "row0 of 'A'");
+        assert_eq!(ram[a_base + 1] as u16, 30u16,  "row1 of 'A'");
+        assert_eq!(ram[a_base + 4] as u16, 63u16,  "row4 of 'A'");
+        assert_eq!(ram[a_base + 9] as u16, 0u16,   "row9 of 'A' (blank)");
     }
 
-    /// draw_char(0, 0, 'A') at even col: 'A' row 0 = 0x18 -> pixels 3,4 set in low byte.
+    /// draw_char(0, 0, 'A') at even col.
+    /// Jack OS 'A' row0=12=0x0C → bits 2,3 set in low byte → pixels (2,0),(3,0).
     #[test]
     fn test_draw_char_even_col() {
         let (ret, _, ram) = compile_and_run_ext(
@@ -830,23 +834,22 @@ mod tests {
             4_000_000,
         );
         assert_eq!(ret, 0);
-        // Row 0 of 'A': 0x18 stored in low byte of screen word 0 (RAM[16384])
-        // Bits 3 and 4 set
+        // Row 0 of 'A': 12 = 0x0C stored in low byte → bits 2,3 set → pixels 2,3
+        assert!( pixel_set(&ram, 2, 0), "pixel (2,0) should be set for 'A' row0");
         assert!( pixel_set(&ram, 3, 0), "pixel (3,0) should be set for 'A' row0");
-        assert!( pixel_set(&ram, 4, 0), "pixel (4,0) should be set for 'A' row0");
         assert!(!pixel_set(&ram, 0, 0), "pixel (0,0) should be clear");
         assert!(!pixel_set(&ram, 7, 0), "pixel (7,0) should be clear");
-        // Row 4 of 'A': 0x7E -> bits 1..6 set
-        assert!( pixel_set(&ram, 1, 4), "pixel (1,4) for 'A' row4");
-        assert!( pixel_set(&ram, 6, 4), "pixel (6,4) for 'A' row4");
-        assert!(!pixel_set(&ram, 0, 4), "pixel (0,4) clear for 'A' row4");
-        assert!(!pixel_set(&ram, 7, 4), "pixel (7,4) clear for 'A' row4");
-        // Row 7 of 'A': 0x00 -> no pixels
-        assert!(!pixel_set(&ram, 3, 7), "pixel (3,7) should be clear (blank row)");
+        // Row 4 of 'A': 63 = 0x3F -> bits 0..5 set → pixels 0..5
+        assert!( pixel_set(&ram, 0, 4), "pixel (0,4) for 'A' row4");
+        assert!( pixel_set(&ram, 5, 4), "pixel (5,4) for 'A' row4");
+        assert!(!pixel_set(&ram, 6, 4), "pixel (6,4) should be clear for 'A' row4");
+        assert!(!pixel_set(&ram, 7, 4), "pixel (7,4) should be clear for 'A' row4");
+        // Row 9 of 'A': 0 -> no pixels
+        assert!(!pixel_set(&ram, 2, 9), "pixel (2,9) should be clear (blank row)");
     }
 
     /// draw_char(1, 0, 'A') at odd col: font byte goes into high byte (bits 8-15).
-    /// 'A' row 0 = 0x18 << 8 = 0x1800 -> bits 11,12 set at x=11,12.
+    /// 'A' row 0 = 12 = 0x0C → high byte = 0x0C00 → bits 10,11 set → pixels 10,11.
     #[test]
     fn test_draw_char_odd_col() {
         let (ret, _, ram) = compile_and_run_ext(
@@ -854,15 +857,15 @@ mod tests {
             4_000_000,
         );
         assert_eq!(ret, 0);
-        // Row 0: 0x18 << 8 = bits 8+3=11, 8+4=12 set
+        // Row 0: 12 in high byte → bits 8+2=10, 8+3=11 set
+        assert!( pixel_set(&ram, 10, 0), "pixel (10,0) for odd-col 'A' row0");
         assert!( pixel_set(&ram, 11, 0), "pixel (11,0) for odd-col 'A' row0");
-        assert!( pixel_set(&ram, 12, 0), "pixel (12,0) for odd-col 'A' row0");
-        assert!(!pixel_set(&ram, 8,  0), "pixel (8,0) should be clear");
+        assert!(!pixel_set(&ram,  8, 0), "pixel (8,0) should be clear");
         assert!(!pixel_set(&ram, 15, 0), "pixel (15,0) should be clear");
-        // Row 4: 0x7E << 8 -> bits 9..14 set at x=9..14
-        assert!( pixel_set(&ram, 9,  4), "pixel (9,4) for odd-col 'A' row4");
-        assert!( pixel_set(&ram, 14, 4), "pixel (14,4) for odd-col 'A' row4");
-        assert!(!pixel_set(&ram, 8,  4), "pixel (8,4) should be clear");
+        // Row 4: 63 in high byte → bits 8..13 set → pixels 8..13
+        assert!( pixel_set(&ram,  8, 4), "pixel (8,4) for odd-col 'A' row4");
+        assert!( pixel_set(&ram, 13, 4), "pixel (13,4) for odd-col 'A' row4");
+        assert!(!pixel_set(&ram, 14, 4), "pixel (14,4) should be clear");
         assert!(!pixel_set(&ram, 15, 4), "pixel (15,4) should be clear");
     }
 
@@ -874,9 +877,9 @@ mod tests {
             4_000_000,
         );
         assert_eq!(ret, 0);
+        assert!( pixel_set(&ram, 2, 0), "pixel (2,0) set by draw_string 'A'");
         assert!( pixel_set(&ram, 3, 0), "pixel (3,0) set by draw_string 'A'");
-        assert!( pixel_set(&ram, 4, 0), "pixel (4,0) set by draw_string 'A'");
-        assert!(!pixel_set(&ram, 0, 0), "pixel (0,0) clear");
+        assert!(!pixel_set(&ram, 7, 0), "pixel (7,0) clear");
     }
 
     // ── Struct tests ─────────────────────────────────────────────────────

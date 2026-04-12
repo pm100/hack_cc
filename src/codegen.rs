@@ -24,118 +24,117 @@
 /// The emulator intercepts writes to this address and outputs to stdout.
 pub const HACK_OUTPUT_PORT: usize = 32767;
 
-/// Base RAM address of the 8×8 font table (96 chars × 8 rows = 768 words).
-/// Placed at the top of general-purpose RAM, just below screen memory (16384).
-/// 15616 + 768 = 16384 (screen base). Valid Hack RAM is 0-16383; screen is 16384-24575.
-pub const FONT_BASE: usize = 15616;
+/// Base RAM address of the 8×11 font table (96 chars × 11 rows = 1056 words).
+/// Placed just below screen memory: 16384 - 1056 = 15328.
+pub const FONT_BASE: usize = 15328;
 
-/// 8×8 bitmap font for ASCII 32-127.
-/// Each entry is 8 bytes, one per screen row, MSB = leftmost pixel
-/// (standard convention; bytes are bit-reversed on write to match Hack's
-/// LSB-leftmost screen layout).
-const FONT_8X8: [[u8; 8]; 96] = [
-    [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // 32 ' '
-    [0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00], // 33 '!'
-    [0x36,0x36,0x00,0x00,0x00,0x00,0x00,0x00], // 34 '"'
-    [0x36,0x36,0x7F,0x36,0x7F,0x36,0x36,0x00], // 35 '#'
-    [0x0C,0x3E,0x60,0x3C,0x06,0x7C,0x18,0x00], // 36 '$'
-    [0x00,0x63,0x33,0x18,0x0C,0x66,0x63,0x00], // 37 '%'
-    [0x1C,0x36,0x1C,0x6E,0x3B,0x33,0x6E,0x00], // 38 '&'
-    [0x18,0x18,0x30,0x00,0x00,0x00,0x00,0x00], // 39 '\''
-    [0x0C,0x18,0x30,0x30,0x30,0x18,0x0C,0x00], // 40 '('
-    [0x30,0x18,0x0C,0x0C,0x0C,0x18,0x30,0x00], // 41 ')'
-    [0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00], // 42 '*'
-    [0x00,0x18,0x18,0x7E,0x18,0x18,0x00,0x00], // 43 '+'
-    [0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x30], // 44 ','
-    [0x00,0x00,0x00,0x7E,0x00,0x00,0x00,0x00], // 45 '-'
-    [0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x00], // 46 '.'
-    [0x03,0x06,0x0C,0x18,0x30,0x60,0x40,0x00], // 47 '/'
-    [0x3E,0x63,0x63,0x6B,0x63,0x63,0x3E,0x00], // 48 '0'
-    [0x18,0x38,0x18,0x18,0x18,0x18,0x7E,0x00], // 49 '1'
-    [0x3C,0x66,0x06,0x1C,0x30,0x66,0x7E,0x00], // 50 '2'
-    [0x3C,0x66,0x06,0x1C,0x06,0x66,0x3C,0x00], // 51 '3'
-    [0x0E,0x1E,0x36,0x66,0x7F,0x06,0x06,0x00], // 52 '4'
-    [0x7E,0x60,0x7C,0x06,0x06,0x66,0x3C,0x00], // 53 '5'
-    [0x1C,0x30,0x60,0x7C,0x66,0x66,0x3C,0x00], // 54 '6'
-    [0x7E,0x66,0x06,0x0C,0x18,0x18,0x18,0x00], // 55 '7'
-    [0x3C,0x66,0x66,0x3C,0x66,0x66,0x3C,0x00], // 56 '8'
-    [0x3C,0x66,0x66,0x3E,0x06,0x0C,0x38,0x00], // 57 '9'
-    [0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x00], // 58 ':'
-    [0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x30], // 59 ';'
-    [0x06,0x0C,0x18,0x30,0x18,0x0C,0x06,0x00], // 60 '<'
-    [0x00,0x00,0x7E,0x00,0x00,0x7E,0x00,0x00], // 61 '='
-    [0x60,0x30,0x18,0x0C,0x18,0x30,0x60,0x00], // 62 '>'
-    [0x3C,0x66,0x06,0x0C,0x18,0x00,0x18,0x00], // 63 '?'
-    [0x3E,0x63,0x6F,0x69,0x6F,0x60,0x3C,0x00], // 64 '@'
-    [0x18,0x3C,0x66,0x66,0x7E,0x66,0x66,0x00], // 65 'A'
-    [0x7C,0x66,0x66,0x7C,0x66,0x66,0x7C,0x00], // 66 'B'
-    [0x3C,0x66,0x60,0x60,0x60,0x66,0x3C,0x00], // 67 'C'
-    [0x78,0x6C,0x66,0x66,0x66,0x6C,0x78,0x00], // 68 'D'
-    [0x7E,0x60,0x60,0x78,0x60,0x60,0x7E,0x00], // 69 'E'
-    [0x7E,0x60,0x60,0x78,0x60,0x60,0x60,0x00], // 70 'F'
-    [0x3C,0x66,0x60,0x6E,0x66,0x66,0x3C,0x00], // 71 'G'
-    [0x66,0x66,0x66,0x7E,0x66,0x66,0x66,0x00], // 72 'H'
-    [0x3C,0x18,0x18,0x18,0x18,0x18,0x3C,0x00], // 73 'I'
-    [0x1E,0x0C,0x0C,0x0C,0x0C,0x6C,0x38,0x00], // 74 'J'
-    [0x66,0x6C,0x78,0x70,0x78,0x6C,0x66,0x00], // 75 'K'
-    [0x60,0x60,0x60,0x60,0x60,0x60,0x7E,0x00], // 76 'L'
-    [0xC3,0xE7,0xFF,0xDB,0xC3,0xC3,0xC3,0x00], // 77 'M'
-    [0xC3,0xE3,0xF3,0xDB,0xCF,0xC7,0xC3,0x00], // 78 'N'
-    [0x3C,0x66,0x66,0x66,0x66,0x66,0x3C,0x00], // 79 'O'
-    [0x7C,0x66,0x66,0x7C,0x60,0x60,0x60,0x00], // 80 'P'
-    [0x3C,0x66,0x66,0x66,0x66,0x3C,0x0E,0x00], // 81 'Q'
-    [0x7C,0x66,0x66,0x7C,0x78,0x6C,0x66,0x00], // 82 'R'
-    [0x3C,0x66,0x60,0x3C,0x06,0x66,0x3C,0x00], // 83 'S'
-    [0x7E,0x18,0x18,0x18,0x18,0x18,0x18,0x00], // 84 'T'
-    [0x66,0x66,0x66,0x66,0x66,0x66,0x3C,0x00], // 85 'U'
-    [0x66,0x66,0x66,0x66,0x66,0x3C,0x18,0x00], // 86 'V'
-    [0xC3,0xC3,0xC3,0xDB,0xFF,0xE7,0xC3,0x00], // 87 'W'
-    [0xC3,0x66,0x3C,0x18,0x3C,0x66,0xC3,0x00], // 88 'X'
-    [0x66,0x66,0x66,0x3C,0x18,0x18,0x18,0x00], // 89 'Y'
-    [0x7E,0x06,0x0C,0x18,0x30,0x60,0x7E,0x00], // 90 'Z'
-    [0x3C,0x30,0x30,0x30,0x30,0x30,0x3C,0x00], // 91 '['
-    [0x80,0x40,0x20,0x10,0x08,0x04,0x02,0x00], // 92 '\'
-    [0x3C,0x0C,0x0C,0x0C,0x0C,0x0C,0x3C,0x00], // 93 ']'
-    [0x10,0x38,0x6C,0xC6,0x00,0x00,0x00,0x00], // 94 '^'
-    [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF], // 95 '_'
-    [0x30,0x18,0x0C,0x00,0x00,0x00,0x00,0x00], // 96 '`'
-    [0x00,0x00,0x3C,0x06,0x3E,0x66,0x3E,0x00], // 97 'a'
-    [0x60,0x60,0x7C,0x66,0x66,0x66,0x7C,0x00], // 98 'b'
-    [0x00,0x00,0x3C,0x60,0x60,0x60,0x3C,0x00], // 99 'c'
-    [0x06,0x06,0x3E,0x66,0x66,0x66,0x3E,0x00], // 100 'd'
-    [0x00,0x00,0x3C,0x66,0x7E,0x60,0x3C,0x00], // 101 'e'
-    [0x1C,0x30,0x30,0x7C,0x30,0x30,0x30,0x00], // 102 'f'
-    [0x00,0x00,0x3E,0x66,0x66,0x3E,0x06,0x3C], // 103 'g'
-    [0x60,0x60,0x7C,0x66,0x66,0x66,0x66,0x00], // 104 'h'
-    [0x18,0x00,0x38,0x18,0x18,0x18,0x3C,0x00], // 105 'i'
-    [0x06,0x00,0x06,0x06,0x06,0x06,0x66,0x3C], // 106 'j'
-    [0x60,0x60,0x66,0x6C,0x78,0x6C,0x66,0x00], // 107 'k'
-    [0x38,0x18,0x18,0x18,0x18,0x18,0x3C,0x00], // 108 'l'
-    [0x00,0x00,0xCC,0xFE,0xFE,0xD6,0xC6,0x00], // 109 'm'
-    [0x00,0x00,0x7C,0x66,0x66,0x66,0x66,0x00], // 110 'n'
-    [0x00,0x00,0x3C,0x66,0x66,0x66,0x3C,0x00], // 111 'o'
-    [0x00,0x00,0x7C,0x66,0x66,0x7C,0x60,0x60], // 112 'p'
-    [0x00,0x00,0x3E,0x66,0x66,0x3E,0x06,0x06], // 113 'q'
-    [0x00,0x00,0x6C,0x76,0x60,0x60,0x60,0x00], // 114 'r'
-    [0x00,0x00,0x3C,0x60,0x3C,0x06,0x7C,0x00], // 115 's'
-    [0x18,0x18,0x7E,0x18,0x18,0x18,0x0E,0x00], // 116 't'
-    [0x00,0x00,0x66,0x66,0x66,0x66,0x3E,0x00], // 117 'u'
-    [0x00,0x00,0x66,0x66,0x66,0x3C,0x18,0x00], // 118 'v'
-    [0x00,0x00,0xC6,0xD6,0xFE,0xFE,0x6C,0x00], // 119 'w'
-    [0x00,0x00,0x66,0x3C,0x18,0x3C,0x66,0x00], // 120 'x'
-    [0x00,0x00,0x66,0x66,0x66,0x3E,0x06,0x3C], // 121 'y'
-    [0x00,0x00,0x7E,0x0C,0x18,0x30,0x7E,0x00], // 122 'z'
-    [0x0E,0x18,0x18,0x70,0x18,0x18,0x0E,0x00], // 123 '{'
-    [0x18,0x18,0x18,0x00,0x18,0x18,0x18,0x00], // 124 '|'
-    [0x70,0x18,0x18,0x0E,0x18,0x18,0x70,0x00], // 125 '}'
-    [0x76,0xDC,0x00,0x00,0x00,0x00,0x00,0x00], // 126 '~'
-    [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // 127 DEL
+/// 8×11 bitmap font for ASCII 32–127, sourced from the nand2tetris Jack OS Output.jack.
+/// Each entry is 11 bytes, one per screen row, bits 0-5 are the visible pixels
+/// (MSB convention; bit-reversed on write to match Hack's LSB-leftmost screen layout).
+/// Row 10 (index 10) is always 0 (inter-line spacing).
+const FONT_8X11: [[u8; 11]; 96] = [
+    [ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],  // 32 ' '
+    [12,30,30,30,12,12, 0,12,12, 0, 0],  // 33 '!'
+    [54,54,20, 0, 0, 0, 0, 0, 0, 0, 0],  // 34 '"'
+    [ 0,18,18,63,18,18,63,18,18, 0, 0],  // 35 '#'
+    [12,30,51, 3,30,48,51,30,12,12, 0],  // 36 '$'
+    [ 0, 0,35,51,24,12, 6,51,49, 0, 0],  // 37 '%'
+    [12,30,30,12,54,27,27,27,54, 0, 0],  // 38 '&'
+    [12,12, 6, 0, 0, 0, 0, 0, 0, 0, 0],  // 39 '\''
+    [24,12, 6, 6, 6, 6, 6,12,24, 0, 0],  // 40 '('
+    [ 6,12,24,24,24,24,24,12, 6, 0, 0],  // 41 ')'
+    [ 0, 0, 0,51,30,63,30,51, 0, 0, 0],  // 42 '*'
+    [ 0, 0, 0,12,12,63,12,12, 0, 0, 0],  // 43 '+'
+    [ 0, 0, 0, 0, 0, 0, 0,12,12, 6, 0],  // 44 ','
+    [ 0, 0, 0, 0, 0,63, 0, 0, 0, 0, 0],  // 45 '-'
+    [ 0, 0, 0, 0, 0, 0, 0,12,12, 0, 0],  // 46 '.'
+    [ 0, 0,32,48,24,12, 6, 3, 1, 0, 0],  // 47 '/'
+    [12,30,51,51,51,51,51,30,12, 0, 0],  // 48 '0'
+    [12,14,15,12,12,12,12,12,63, 0, 0],  // 49 '1'
+    [30,51,48,24,12, 6, 3,51,63, 0, 0],  // 50 '2'
+    [30,51,48,48,28,48,48,51,30, 0, 0],  // 51 '3'
+    [16,24,28,26,25,63,24,24,60, 0, 0],  // 52 '4'
+    [63, 3, 3,31,48,48,48,51,30, 0, 0],  // 53 '5'
+    [28, 6, 3, 3,31,51,51,51,30, 0, 0],  // 54 '6'
+    [63,49,48,48,24,12,12,12,12, 0, 0],  // 55 '7'
+    [30,51,51,51,30,51,51,51,30, 0, 0],  // 56 '8'
+    [30,51,51,51,62,48,48,24,14, 0, 0],  // 57 '9'
+    [ 0, 0,12,12, 0, 0,12,12, 0, 0, 0],  // 58 ':'
+    [ 0, 0,12,12, 0, 0,12,12, 6, 0, 0],  // 59 ';'
+    [ 0, 0,24,12, 6, 3, 6,12,24, 0, 0],  // 60 '<'
+    [ 0, 0, 0,63, 0, 0,63, 0, 0, 0, 0],  // 61 '='
+    [ 0, 0, 3, 6,12,24,12, 6, 3, 0, 0],  // 62 '>'
+    [30,51,51,24,12,12, 0,12,12, 0, 0],  // 63 '?'
+    [30,51,51,59,59,59,27, 3,30, 0, 0],  // 64 '@'
+    [12,30,51,51,63,51,51,51,51, 0, 0],  // 65 'A'
+    [31,51,51,51,31,51,51,51,31, 0, 0],  // 66 'B'
+    [28,54,35, 3, 3, 3,35,54,28, 0, 0],  // 67 'C'
+    [15,27,51,51,51,51,51,27,15, 0, 0],  // 68 'D'
+    [63,51,35,11,15,11,35,51,63, 0, 0],  // 69 'E'
+    [63,51,35,11,15,11, 3, 3, 3, 0, 0],  // 70 'F'
+    [28,54,35, 3,59,51,51,54,44, 0, 0],  // 71 'G'
+    [51,51,51,51,63,51,51,51,51, 0, 0],  // 72 'H'
+    [30,12,12,12,12,12,12,12,30, 0, 0],  // 73 'I'
+    [60,24,24,24,24,24,27,27,14, 0, 0],  // 74 'J'
+    [51,51,51,27,15,27,51,51,51, 0, 0],  // 75 'K'
+    [ 3, 3, 3, 3, 3, 3,35,51,63, 0, 0],  // 76 'L'
+    [33,51,63,63,51,51,51,51,51, 0, 0],  // 77 'M'
+    [51,51,55,55,63,59,59,51,51, 0, 0],  // 78 'N'
+    [30,51,51,51,51,51,51,51,30, 0, 0],  // 79 'O'
+    [31,51,51,51,31, 3, 3, 3, 3, 0, 0],  // 80 'P'
+    [30,51,51,51,51,51,63,59,30,48, 0],  // 81 'Q'
+    [31,51,51,51,31,27,51,51,51, 0, 0],  // 82 'R'
+    [30,51,51, 6,28,48,51,51,30, 0, 0],  // 83 'S'
+    [63,63,45,12,12,12,12,12,30, 0, 0],  // 84 'T'
+    [51,51,51,51,51,51,51,51,30, 0, 0],  // 85 'U'
+    [51,51,51,51,51,30,30,12,12, 0, 0],  // 86 'V'
+    [51,51,51,51,51,63,63,63,18, 0, 0],  // 87 'W'
+    [51,51,30,30,12,30,30,51,51, 0, 0],  // 88 'X'
+    [51,51,51,51,30,12,12,12,30, 0, 0],  // 89 'Y'
+    [63,51,49,24,12, 6,35,51,63, 0, 0],  // 90 'Z'
+    [30, 6, 6, 6, 6, 6, 6, 6,30, 0, 0],  // 91 '['
+    [ 0, 0, 1, 3, 6,12,24,48,32, 0, 0],  // 92 '\'
+    [30,24,24,24,24,24,24,24,30, 0, 0],  // 93 ']'
+    [ 8,28,54, 0, 0, 0, 0, 0, 0, 0, 0],  // 94 '^'
+    [ 0, 0, 0, 0, 0, 0, 0, 0, 0,63, 0],  // 95 '_'
+    [ 6,12,24, 0, 0, 0, 0, 0, 0, 0, 0],  // 96 '`'
+    [ 0, 0, 0,14,24,30,27,27,54, 0, 0],  // 97 'a'
+    [ 3, 3, 3,15,27,51,51,51,30, 0, 0],  // 98 'b'
+    [ 0, 0, 0,30,51, 3, 3,51,30, 0, 0],  // 99 'c'
+    [48,48,48,60,54,51,51,51,30, 0, 0],  // 100 'd'
+    [ 0, 0, 0,30,51,63, 3,51,30, 0, 0],  // 101 'e'
+    [28,54,38, 6,15, 6, 6, 6,15, 0, 0],  // 102 'f'
+    [ 0, 0,30,51,51,51,62,48,51,30, 0],  // 103 'g'
+    [ 3, 3, 3,27,55,51,51,51,51, 0, 0],  // 104 'h'
+    [12,12, 0,14,12,12,12,12,30, 0, 0],  // 105 'i'
+    [48,48, 0,56,48,48,48,48,51,30, 0],  // 106 'j'
+    [ 3, 3, 3,51,27,15,15,27,51, 0, 0],  // 107 'k'
+    [14,12,12,12,12,12,12,12,30, 0, 0],  // 108 'l'
+    [ 0, 0, 0,29,63,43,43,43,43, 0, 0],  // 109 'm'
+    [ 0, 0, 0,29,51,51,51,51,51, 0, 0],  // 110 'n'
+    [ 0, 0, 0,30,51,51,51,51,30, 0, 0],  // 111 'o'
+    [ 0, 0, 0,30,51,51,51,31, 3, 3, 0],  // 112 'p'
+    [ 0, 0, 0,30,51,51,51,62,48,48, 0],  // 113 'q'
+    [ 0, 0, 0,29,55,51, 3, 3, 7, 0, 0],  // 114 'r'
+    [ 0, 0, 0,30,51, 6,24,51,30, 0, 0],  // 115 's'
+    [ 4, 6, 6,15, 6, 6, 6,54,28, 0, 0],  // 116 't'
+    [ 0, 0, 0,27,27,27,27,27,54, 0, 0],  // 117 'u'
+    [ 0, 0, 0,51,51,51,51,30,12, 0, 0],  // 118 'v'
+    [ 0, 0, 0,51,51,51,63,63,18, 0, 0],  // 119 'w'
+    [ 0, 0, 0,51,30,12,12,30,51, 0, 0],  // 120 'x'
+    [ 0, 0, 0,51,51,51,62,48,24,15, 0],  // 121 'y'
+    [ 0, 0, 0,63,27,12, 6,51,63, 0, 0],  // 122 'z'
+    [56,12,12,12, 7,12,12,12,56, 0, 0],  // 123 '{'
+    [12,12,12,12,12,12,12,12,12, 0, 0],  // 124 '|'
+    [ 7,12,12,12,56,12,12,12, 7, 0, 0],  // 125 '}'
+    [38,45,25, 0, 0, 0, 0, 0, 0, 0, 0],  // 126 '~'
+    [ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],  // 127 DEL
 ];
 
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use crate::sema::{SemaResult, AnnotatedFunc, VarInfo, VarStorage, type_size};
-use crate::parser::{Expr, Stmt, BinOp, UnOp, Type};
+use crate::parser::{Expr, Stmt, BinOp, UnOp, Type, SwitchLabel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinKind {
@@ -149,6 +148,12 @@ pub enum BuiltinKind {
     DrawString,
     Mul,
     Div,
+    // String functions
+    Strcpy,
+    Strcmp,
+    Strcat,
+    // I/O
+    Itoa,
 }
 
 /// A single RAM pre-initialisation entry produced by the compiler.
@@ -181,6 +186,7 @@ struct Gen {
     string_map: HashMap<String, usize>,
     struct_defs: HashMap<String, Vec<(String, Type)>>,
     used_builtins: HashSet<BuiltinKind>,
+    loop_ctx: Vec<(String, String)>,   // (break_label, continue_label)
 }
 
 impl Gen {
@@ -189,7 +195,7 @@ impl Gen {
         struct_defs: HashMap<String, Vec<(String, Type)>>,
         used_builtins: HashSet<BuiltinKind>,
     ) -> Self {
-        Self { out: Vec::new(), label_id: 0, string_map, struct_defs, used_builtins }
+        Self { out: Vec::new(), label_id: 0, string_map, struct_defs, used_builtins, loop_ctx: Vec::new() }
     }
 
     fn emit(&mut self, s: impl Into<String>) {
@@ -226,6 +232,37 @@ impl Gen {
         self.pop_d();
         self.emit("@R13");
         self.emit("M=D");
+    }
+
+    fn emit_stride_mul(&mut self, stride: usize) {
+        if stride == 1 { return; }
+        let id = self.label();
+        let l_loop = format!("__stride_loop_{}", id);
+        let l_done = format!("__stride_done_{}", id);
+        self.emit("@R13");
+        self.emit("M=D");       // R13 = idx
+        self.emit("@R14");
+        self.emit("M=0");       // R14 = accumulator = 0
+        self.emit(&format!("@{}", stride));
+        self.emit("D=A");
+        self.emit("@R15");
+        self.emit("M=D");       // R15 = stride (loop counter)
+        self.emit(&format!("({})", l_loop));
+        self.emit("@R15");
+        self.emit("D=M");
+        self.emit(&format!("@{}", l_done));
+        self.emit("D;JEQ");
+        self.emit("@R13");
+        self.emit("D=M");
+        self.emit("@R14");
+        self.emit("M=D+M");     // R14 += idx
+        self.emit("@R15");
+        self.emit("M=M-1");
+        self.emit(&format!("@{}", l_loop));
+        self.emit("0;JMP");
+        self.emit(&format!("({})", l_done));
+        self.emit("@R14");
+        self.emit("D=M");       // D = idx * stride
     }
 
     // ── Load/Store variables ─────────────────────────────────────────────
@@ -411,7 +448,12 @@ impl Gen {
                 let info = vars.get(name).ok_or_else(|| {
                     CodegenError::new(format!("undefined variable '{}'", name))
                 })?.clone();
-                self.load_var(&info);
+                // Arrays decay to a pointer to their first element (C semantics).
+                if matches!(info.ty, crate::parser::Type::Array(..)) {
+                    self.addr_of_var(&info);
+                } else {
+                    self.load_var(&info);
+                }
             }
 
             Expr::UnOp(op, inner) => {
@@ -470,19 +512,44 @@ impl Gen {
             }
 
             Expr::Index(base, idx) => {
-                // arr[i] = *(arr + i)
+                let base_ty = self.expr_type(base, vars);
+                let stride = match &base_ty {
+                    Some(Type::Array(elem_ty, _)) | Some(Type::Ptr(elem_ty)) => {
+                        self.type_size(elem_ty).max(1)
+                    }
+                    _ => 1,
+                };
+                let elem_is_array = matches!(
+                    &base_ty,
+                    Some(Type::Array(e, _)) if matches!(e.as_ref(), Type::Array(_, _))
+                );
+
                 self.gen_expr(base, vars)?;
                 self.gen_expr(idx, vars)?;
-                // stack: [..., base, idx]
-                self.pop_d();             // D = idx
-                self.emit("@R14");
-                self.emit("M=D");         // R14 = idx
-                self.pop_d();             // D = base
-                self.emit("@R14");
-                self.emit("D=D+M");       // D = base + idx (address)
-                self.emit("A=D");
-                self.emit("D=M");         // D = RAM[base+idx]
-                self.push_d();
+
+                self.pop_d();   // D = idx
+                if stride == 1 {
+                    self.emit("@R14");
+                    self.emit("M=D");
+                    self.pop_d();
+                    self.emit("@R14");
+                    self.emit("D=D+M");   // D = base + idx
+                } else {
+                    self.emit_stride_mul(stride);
+                    self.emit("@R14");
+                    self.emit("M=D");   // save idx*stride
+                    self.pop_d();       // D = base
+                    self.emit("@R14");
+                    self.emit("D=D+M"); // D = base + idx*stride
+                }
+
+                if elem_is_array {
+                    self.push_d();
+                } else {
+                    self.emit("A=D");
+                    self.emit("D=M");   // D = value at address
+                    self.push_d();
+                }
             }
 
             Expr::Member(_, _) => {
@@ -492,6 +559,67 @@ impl Gen {
                 self.emit("A=D");
                 self.emit("D=M");
                 self.push_d();
+            }
+
+            Expr::Ternary(cond, then_e, else_e) => {
+                let id = self.label();
+                let l_false = format!("__tern_f_{}", id);
+                let l_end   = format!("__tern_e_{}", id);
+                self.gen_expr(cond, vars)?;
+                self.pop_d();
+                self.emit(&format!("@{}", l_false));
+                self.emit("D;JEQ");
+                self.gen_expr(then_e, vars)?;
+                self.emit(&format!("@{}", l_end));
+                self.emit("0;JMP");
+                self.emit(&format!("({})", l_false));
+                self.gen_expr(else_e, vars)?;
+                self.emit(&format!("({})", l_end));
+            }
+
+            Expr::PostInc(inner) => {
+                self.gen_addr(inner, vars)?;
+                self.pop_d();
+                self.emit("@R13");
+                self.emit("M=D");       // R13 = address
+                self.emit("@R13");
+                self.emit("A=M");       // A = address
+                self.emit("D=M");       // D = old value
+                self.push_d();          // push old value (expression result)
+                self.emit("@R13");
+                self.emit("A=M");       // A = address
+                self.emit("M=M+1");     // increment in place
+            }
+            Expr::PostDec(inner) => {
+                self.gen_addr(inner, vars)?;
+                self.pop_d();
+                self.emit("@R13");
+                self.emit("M=D");       // R13 = address
+                self.emit("@R13");
+                self.emit("A=M");       // A = address
+                self.emit("D=M");       // D = old value
+                self.push_d();          // push old value (expression result)
+                self.emit("@R13");
+                self.emit("A=M");       // A = address
+                self.emit("M=M-1");     // decrement in place
+            }
+            Expr::Cast(ty, inner) => {
+                self.gen_expr(inner, vars)?;
+                if matches!(ty, Type::Char) {
+                    self.pop_d();
+                    self.emit("@255");
+                    self.emit("D=D&A");
+                    self.push_d();
+                }
+                // All other casts: no-op
+            }
+            Expr::InitList(items) => {
+                if let Some(first) = items.first() {
+                    self.gen_expr(first, vars)?;
+                } else {
+                    self.emit("D=0");
+                    self.push_d();
+                }
             }
         }
         Ok(())
@@ -515,18 +643,30 @@ impl Gen {
                 self.gen_expr(inner, vars)?;
             }
             Expr::Index(base, idx) => {
-                // &arr[i] = arr + i
+                let base_ty = self.expr_type(base, vars);
+                let stride = match &base_ty {
+                    Some(Type::Array(elem_ty, _)) | Some(Type::Ptr(elem_ty)) => {
+                        self.type_size(elem_ty).max(1)
+                    }
+                    _ => 1,
+                };
                 self.gen_expr(base, vars)?;
                 self.gen_expr(idx, vars)?;
-                self.pop_d();
-                self.emit("@R14");
-                self.emit("M=D");
-                self.emit("@SP");
-                self.emit("M=M-1");
-                self.emit("A=M");
-                self.emit("D=M");
-                self.emit("@R14");
-                self.emit("D=D+M");
+                self.pop_d();   // D = idx
+                if stride == 1 {
+                    self.emit("@R14");
+                    self.emit("M=D");
+                    self.pop_d();       // D = base
+                    self.emit("@R14");
+                    self.emit("D=D+M");
+                } else {
+                    self.emit_stride_mul(stride);
+                    self.emit("@R14");
+                    self.emit("M=D");   // save idx*stride
+                    self.pop_d();       // D = base
+                    self.emit("@R14");
+                    self.emit("D=D+M");
+                }
                 self.push_d();
             }
             Expr::Member(base, field) => {
@@ -572,6 +712,24 @@ impl Gen {
                 _ => unreachable!(),
             };
             // lhs = lhs op rhs
+            let new_rhs = Expr::BinOp(arith_op, Box::new(lhs.clone()), Box::new(rhs.clone()));
+            return self.gen_assign(lhs, &new_rhs, vars);
+        }
+        // New compound assignments
+        if matches!(op, BinOp::MulAssign | BinOp::DivAssign | BinOp::ModAssign
+            | BinOp::AndAssign | BinOp::OrAssign | BinOp::XorAssign
+            | BinOp::ShlAssign | BinOp::ShrAssign) {
+            let arith_op = match op {
+                BinOp::MulAssign => BinOp::Mul,
+                BinOp::DivAssign => BinOp::Div,
+                BinOp::ModAssign => BinOp::Mod,
+                BinOp::AndAssign => BinOp::BitAnd,
+                BinOp::OrAssign  => BinOp::BitOr,
+                BinOp::XorAssign => BinOp::BitXor,
+                BinOp::ShlAssign => BinOp::Shl,
+                BinOp::ShrAssign => BinOp::Shr,
+                _ => unreachable!(),
+            };
             let new_rhs = Expr::BinOp(arith_op, Box::new(lhs.clone()), Box::new(rhs.clone()));
             return self.gen_assign(lhs, &new_rhs, vars);
         }
@@ -666,12 +824,95 @@ impl Gen {
                 self.emit("D=D|M");
                 self.push_d();
             }
+            BinOp::BitXor => {
+                // D = lhs, R14 = rhs
+                // XOR = (lhs | rhs) & ~(lhs & rhs)
+                // Use R13 (lhs copy), R15 (~(lhs & rhs))
+                self.emit("@R13");
+                self.emit("M=D");       // R13 = lhs
+                self.emit("@R14");
+                self.emit("D=D&M");     // D = lhs & rhs
+                self.emit("D=!D");      // D = ~(lhs & rhs)
+                self.emit("@R15");
+                self.emit("M=D");       // R15 = ~(lhs & rhs)
+                self.emit("@R13");
+                self.emit("D=M");       // D = lhs
+                self.emit("@R14");
+                self.emit("D=D|M");     // D = lhs | rhs
+                self.emit("@R15");
+                self.emit("D=D&M");     // D = XOR
+                self.push_d();
+            }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 self.gen_cmp(op)?;
             }
-            BinOp::Assign | BinOp::AddAssign | BinOp::SubAssign | BinOp::And | BinOp::Or => {
-                unreachable!()
+            BinOp::Shl => {
+                self.emit("@R13");
+                self.emit("M=D");       // R13 = value (lhs), R14 = shift amount (rhs)
+                let id = self.label();
+                let l_loop = format!("__shl_loop_{}", id);
+                let l_end  = format!("__shl_end_{}", id);
+                self.emit(&format!("({})", l_loop));
+                self.emit("@R14");
+                self.emit("D=M");
+                self.emit(&format!("@{}", l_end));
+                self.emit("D;JEQ");
+                self.emit("@R13");
+                self.emit("D=M");
+                self.emit("M=D+M");     // R13 = R13 * 2
+                self.emit("@R14");
+                self.emit("M=M-1");
+                self.emit(&format!("@{}", l_loop));
+                self.emit("0;JMP");
+                self.emit(&format!("({})", l_end));
+                self.emit("@R13");
+                self.emit("D=M");
+                self.push_d();
             }
+            BinOp::Shr => {
+                self.emit("@R13");
+                self.emit("M=D");       // R13 = dividend (lhs)
+                // R14 already has n (rhs)
+                let id = self.label();
+                let l_pow_loop = format!("__shr_pow_{}", id);
+                let l_pow_end  = format!("__shr_pow_end_{}", id);
+                self.emit("@R14");
+                self.emit("D=M");       // D = n
+                self.emit("@R15");
+                self.emit("M=D");       // R15 = n
+                self.emit("@R14");
+                self.emit("M=1");       // R14 = 1 (will become 2^n)
+                self.emit(&format!("({})", l_pow_loop));
+                self.emit("@R15");
+                self.emit("D=M");
+                self.emit(&format!("@{}", l_pow_end));
+                self.emit("D;JEQ");
+                self.emit("@R14");
+                self.emit("D=M");
+                self.emit("M=D+M");     // R14 *= 2
+                self.emit("@R15");
+                self.emit("M=M-1");
+                self.emit(&format!("@{}", l_pow_loop));
+                self.emit("0;JMP");
+                self.emit(&format!("({})", l_pow_end));
+                // Now R13 = dividend, R14 = 2^n, call __div
+                let ret_lbl = format!("__shr_div_ret_{}", id);
+                self.emit(&format!("@{}", ret_lbl));
+                self.emit("D=A");
+                self.emit("@R3");
+                self.emit("M=D");
+                self.emit("@__div");
+                self.emit("0;JMP");
+                self.emit(&format!("({})", ret_lbl));
+                self.emit("@R13");
+                self.emit("D=M");
+                self.push_d();
+            }
+            BinOp::Assign | BinOp::AddAssign | BinOp::SubAssign
+            | BinOp::MulAssign | BinOp::DivAssign | BinOp::ModAssign
+            | BinOp::AndAssign | BinOp::OrAssign | BinOp::XorAssign
+            | BinOp::ShlAssign | BinOp::ShrAssign
+            | BinOp::And | BinOp::Or => unreachable!(),
         }
         Ok(())
     }
@@ -1116,6 +1357,206 @@ impl Gen {
                 self.push_d();
                 return Ok(());
             }
+            // ── abs(x) — inline: if x < 0, negate it ────────────────────────
+            "abs" => {
+                if args.len() != 1 {
+                    return Err(CodegenError::new("abs expects 1 argument"));
+                }
+                self.gen_expr(&args[0], vars)?;
+                self.pop_d();
+                let id = self.label();
+                let done = format!("__abs_done_{}", id);
+                self.emit(&format!("@{}", done));
+                self.emit("D;JGE");
+                self.emit("D=-D");
+                self.emit(&format!("({})", done));
+                self.push_d();
+                return Ok(());
+            }
+            // ── min(a, b) — inline ──────────────────────────────────────────
+            "min" => {
+                if args.len() != 2 {
+                    return Err(CodegenError::new("min expects 2 arguments"));
+                }
+                self.gen_expr(&args[0], vars)?;
+                self.gen_expr(&args[1], vars)?;
+                self.pop_d();           // D = b
+                self.emit("@R13");
+                self.emit("M=D");       // R13 = b
+                self.pop_d();           // D = a
+                let id = self.label();
+                let use_b = format!("__min_b_{}", id);
+                let done  = format!("__min_done_{}", id);
+                self.emit("@R13");
+                self.emit("D=D-M");     // D = a - b
+                self.emit(&format!("@{}", use_b));
+                self.emit("D;JGT");     // a - b > 0  =>  a > b  =>  use b
+                // a <= b: use a (restore a = (a-b)+b = (a-b)+R13)
+                self.emit("@R13");
+                self.emit("D=D+M");     // D = a
+                self.emit(&format!("@{}", done));
+                self.emit("0;JMP");
+                self.emit(&format!("({})", use_b));
+                self.emit("@R13");
+                self.emit("D=M");       // D = b
+                self.emit(&format!("({})", done));
+                self.push_d();
+                return Ok(());
+            }
+            // ── max(a, b) — inline ──────────────────────────────────────────
+            "max" => {
+                if args.len() != 2 {
+                    return Err(CodegenError::new("max expects 2 arguments"));
+                }
+                self.gen_expr(&args[0], vars)?;
+                self.gen_expr(&args[1], vars)?;
+                self.pop_d();           // D = b
+                self.emit("@R13");
+                self.emit("M=D");       // R13 = b
+                self.pop_d();           // D = a
+                let id = self.label();
+                let use_a = format!("__max_a_{}", id);
+                let done  = format!("__max_done_{}", id);
+                self.emit("@R13");
+                self.emit("D=D-M");     // D = a - b
+                self.emit(&format!("@{}", use_a));
+                self.emit("D;JGT");     // a > b => use a
+                // a <= b: use b
+                self.emit("@R13");
+                self.emit("D=M");
+                self.emit(&format!("@{}", done));
+                self.emit("0;JMP");
+                self.emit(&format!("({})", use_a));
+                // restore a = (a-b) + b
+                self.emit("@R13");
+                self.emit("D=D+M");
+                self.emit(&format!("({})", done));
+                self.push_d();
+                return Ok(());
+            }
+            // ── read_key() — read Hack keyboard port non-blocking ───────────
+            "read_key" => {
+                if !args.is_empty() {
+                    return Err(CodegenError::new("read_key expects 0 arguments"));
+                }
+                self.emit("@KBD");
+                self.emit("D=M");
+                self.push_d();
+                return Ok(());
+            }
+            // ── strcpy(dst, src) — subroutine ───────────────────────────────
+            "strcpy" => {
+                if args.len() != 2 {
+                    return Err(CodegenError::new("strcpy expects 2 arguments"));
+                }
+                self.used_builtins.insert(BuiltinKind::Strcpy);
+                self.gen_expr(&args[0], vars)?;
+                self.pop_d();
+                self.emit("@R13");
+                self.emit("M=D");   // R13 = dst
+                self.gen_expr(&args[1], vars)?;
+                self.pop_d();
+                self.emit("@R14");
+                self.emit("M=D");   // R14 = src
+                let id = self.label();
+                let ret_lbl = format!("__strcpy_ret_{}", id);
+                self.emit(&format!("@{}", ret_lbl));
+                self.emit("D=A");
+                self.emit("@R3");
+                self.emit("M=D");
+                self.emit("@__strcpy");
+                self.emit("0;JMP");
+                self.emit(&format!("({})", ret_lbl));
+                self.emit("@R13");
+                self.emit("D=M");   // return original dst (R13 restored by subroutine)
+                self.push_d();
+                return Ok(());
+            }
+            // ── strcmp(a, b) — subroutine ────────────────────────────────────
+            "strcmp" => {
+                if args.len() != 2 {
+                    return Err(CodegenError::new("strcmp expects 2 arguments"));
+                }
+                self.used_builtins.insert(BuiltinKind::Strcmp);
+                self.gen_expr(&args[0], vars)?;
+                self.pop_d();
+                self.emit("@R13");
+                self.emit("M=D");   // R13 = a
+                self.gen_expr(&args[1], vars)?;
+                self.pop_d();
+                self.emit("@R14");
+                self.emit("M=D");   // R14 = b
+                let id = self.label();
+                let ret_lbl = format!("__strcmp_ret_{}", id);
+                self.emit(&format!("@{}", ret_lbl));
+                self.emit("D=A");
+                self.emit("@R3");
+                self.emit("M=D");
+                self.emit("@__strcmp");
+                self.emit("0;JMP");
+                self.emit(&format!("({})", ret_lbl));
+                self.emit("@R13");
+                self.emit("D=M");   // result in R13
+                self.push_d();
+                return Ok(());
+            }
+            // ── strcat(dst, src) — subroutine ───────────────────────────────
+            "strcat" => {
+                if args.len() != 2 {
+                    return Err(CodegenError::new("strcat expects 2 arguments"));
+                }
+                self.used_builtins.insert(BuiltinKind::Strcat);
+                self.gen_expr(&args[0], vars)?;
+                self.pop_d();
+                self.emit("@R13");
+                self.emit("M=D");   // R13 = dst
+                self.gen_expr(&args[1], vars)?;
+                self.pop_d();
+                self.emit("@R14");
+                self.emit("M=D");   // R14 = src
+                let id = self.label();
+                let ret_lbl = format!("__strcat_ret_{}", id);
+                self.emit(&format!("@{}", ret_lbl));
+                self.emit("D=A");
+                self.emit("@R3");
+                self.emit("M=D");
+                self.emit("@__strcat");
+                self.emit("0;JMP");
+                self.emit(&format!("({})", ret_lbl));
+                self.emit("@R13");
+                self.emit("D=M");   // return original dst
+                self.push_d();
+                return Ok(());
+            }
+            // ── itoa(n, buf) — subroutine ────────────────────────────────────
+            "itoa" => {
+                if args.len() != 2 {
+                    return Err(CodegenError::new("itoa expects 2 arguments"));
+                }
+                self.used_builtins.insert(BuiltinKind::Itoa);
+                self.used_builtins.insert(BuiltinKind::Div);
+                self.gen_expr(&args[0], vars)?;
+                self.pop_d();
+                self.emit("@R13");
+                self.emit("M=D");   // R13 = n
+                self.gen_expr(&args[1], vars)?;
+                self.pop_d();
+                self.emit("@R14");
+                self.emit("M=D");   // R14 = buf
+                let id = self.label();
+                let ret_lbl = format!("__itoa_ret_{}", id);
+                self.emit(&format!("@{}", ret_lbl));
+                self.emit("D=A");
+                self.emit("@R3");
+                self.emit("M=D");
+                self.emit("@__itoa");
+                self.emit("0;JMP");
+                self.emit(&format!("({})", ret_lbl));
+                self.emit("@R14");
+                self.emit("D=M");   // return buf
+                self.push_d();
+                return Ok(());
+            }
             _ => {}
         }
 
@@ -1200,15 +1641,69 @@ impl Gen {
             }
             Stmt::Decl(_, name, init) => {
                 if let Some(init_expr) = init {
-                    // eval init, store directly to local (same as assign)
                     let info = vars.get(name).ok_or_else(|| {
                         CodegenError::new(format!("undefined local '{}'", name))
                     })?.clone();
-                    self.gen_expr(init_expr, vars)?;
-                    self.pop_d();
-                    self.emit("@R13");
-                    self.emit("M=D");
-                    self.store_var_from_r13(&info);
+                    if let Expr::InitList(items) = init_expr {
+                        for (i, item) in items.iter().enumerate() {
+                            self.gen_expr(item, vars)?;
+                            self.pop_d();
+                            self.emit("@R13");
+                            self.emit("M=D");
+                            match &info.storage {
+                                VarStorage::Local(base) => {
+                                    let idx = base + i;
+                                    self.emit("@LCL");
+                                    self.emit("D=M");
+                                    if idx > 0 {
+                                        self.emit(&format!("@{}", idx));
+                                        self.emit("D=D+A");
+                                    }
+                                    self.emit("@R14");
+                                    self.emit("M=D");
+                                    self.emit("@R13");
+                                    self.emit("D=M");
+                                    self.emit("@R14");
+                                    self.emit("A=M");
+                                    self.emit("M=D");
+                                }
+                                VarStorage::Global(base) => {
+                                    let addr = base + i;
+                                    self.emit(&format!("@{}", addr));
+                                    self.emit("D=A");
+                                    self.emit("@R14");
+                                    self.emit("M=D");
+                                    self.emit("@R13");
+                                    self.emit("D=M");
+                                    self.emit("@R14");
+                                    self.emit("A=M");
+                                    self.emit("M=D");
+                                }
+                                VarStorage::Param(base) => {
+                                    let idx = base + i;
+                                    self.emit("@ARG");
+                                    self.emit("D=M");
+                                    if idx > 0 {
+                                        self.emit(&format!("@{}", idx));
+                                        self.emit("D=D+A");
+                                    }
+                                    self.emit("@R14");
+                                    self.emit("M=D");
+                                    self.emit("@R13");
+                                    self.emit("D=M");
+                                    self.emit("@R14");
+                                    self.emit("A=M");
+                                    self.emit("M=D");
+                                }
+                            }
+                        }
+                    } else {
+                        self.gen_expr(init_expr, vars)?;
+                        self.pop_d();
+                        self.emit("@R13");
+                        self.emit("M=D");
+                        self.store_var_from_r13(&info);
+                    }
                 }
             }
             Stmt::Return(expr) => {
@@ -1243,6 +1738,7 @@ impl Gen {
                 let id = self.label();
                 let l_top = format!("__while_top_{}", id);
                 let l_end = format!("__while_end_{}", id);
+                self.loop_ctx.push((l_end.clone(), l_top.clone()));
                 self.emit(&format!("({})", l_top));
                 self.gen_expr(cond, vars)?;
                 self.pop_d();
@@ -1252,14 +1748,17 @@ impl Gen {
                 self.emit(&format!("@{}", l_top));
                 self.emit("0;JMP");
                 self.emit(&format!("({})", l_end));
+                self.loop_ctx.pop();
             }
             Stmt::For { init, cond, incr, body } => {
                 let id = self.label();
-                let l_top = format!("__for_top_{}", id);
-                let l_end = format!("__for_end_{}", id);
+                let l_top  = format!("__for_top_{}", id);
+                let l_incr = format!("__for_incr_{}", id);
+                let l_end  = format!("__for_end_{}", id);
                 if let Some(s) = init {
                     self.gen_stmt(s, vars, func_name)?;
                 }
+                self.loop_ctx.push((l_end.clone(), l_incr.clone()));
                 self.emit(&format!("({})", l_top));
                 if let Some(c) = cond {
                     self.gen_expr(c, vars)?;
@@ -1268,12 +1767,107 @@ impl Gen {
                     self.emit("D;JEQ");
                 }
                 self.gen_stmt(body, vars, func_name)?;
+                self.emit(&format!("({})", l_incr));
                 if let Some(inc) = incr {
                     self.gen_expr(inc, vars)?;
-                    self.pop_d(); // discard
+                    self.pop_d();
                 }
                 self.emit(&format!("@{}", l_top));
                 self.emit("0;JMP");
+                self.emit(&format!("({})", l_end));
+                self.loop_ctx.pop();
+            }
+
+            Stmt::DoWhile(body, cond) => {
+                let id = self.label();
+                let l_top  = format!("__dowhile_top_{}", id);
+                let l_cond = format!("__dowhile_cond_{}", id);
+                let l_end  = format!("__dowhile_end_{}", id);
+                self.loop_ctx.push((l_end.clone(), l_cond.clone()));
+                self.emit(&format!("({})", l_top));
+                self.gen_stmt(body, vars, func_name)?;
+                self.emit(&format!("({})", l_cond));
+                self.gen_expr(cond, vars)?;
+                self.pop_d();
+                self.emit(&format!("@{}", l_end));
+                self.emit("D;JEQ");
+                self.emit(&format!("@{}", l_top));
+                self.emit("0;JMP");
+                self.emit(&format!("({})", l_end));
+                self.loop_ctx.pop();
+            }
+            Stmt::Break => {
+                if let Some((l_break, _)) = self.loop_ctx.last().cloned() {
+                    self.emit(&format!("@{}", l_break));
+                    self.emit("0;JMP");
+                }
+            }
+            Stmt::Continue => {
+                if let Some((_, l_continue)) = self.loop_ctx.last().cloned() {
+                    if !l_continue.is_empty() {
+                        self.emit(&format!("@{}", l_continue));
+                        self.emit("0;JMP");
+                    }
+                }
+            }
+            Stmt::Switch { expr, arms } => {
+                let id = self.label();
+                let l_end = format!("__switch_end_{}", id);
+
+                self.gen_expr(expr, vars)?;
+                self.pop_d();
+                self.emit("@R13");
+                self.emit("M=D");
+
+                let arm_labels: Vec<String> = (0..arms.len())
+                    .map(|i| format!("__switch_arm_{}_{}", id, i))
+                    .collect();
+
+                let mut default_label: Option<String> = None;
+
+                for (i, arm) in arms.iter().enumerate() {
+                    for label in &arm.labels {
+                        match label {
+                            SwitchLabel::Case(val) => {
+                                let val = *val;
+                                self.emit("@R13");
+                                self.emit("D=M");
+                                if val == 0 {
+                                    // compare with 0: D=value already
+                                } else if val > 0 {
+                                    self.emit(&format!("@{}", val));
+                                    self.emit("D=D-A");
+                                } else {
+                                    self.emit(&format!("@{}", -val));
+                                    self.emit("D=D+A");
+                                }
+                                self.emit(&format!("@{}", arm_labels[i]));
+                                self.emit("D;JEQ");
+                            }
+                            SwitchLabel::Default => {
+                                default_label = Some(arm_labels[i].clone());
+                            }
+                        }
+                    }
+                }
+                if let Some(ref dl) = default_label {
+                    self.emit(&format!("@{}", dl));
+                    self.emit("0;JMP");
+                } else {
+                    self.emit(&format!("@{}", l_end));
+                    self.emit("0;JMP");
+                }
+
+                self.loop_ctx.push((l_end.clone(), String::new()));
+
+                for (i, arm) in arms.iter().enumerate() {
+                    self.emit(&format!("({})", arm_labels[i]));
+                    for s in &arm.stmts {
+                        self.gen_stmt(s, vars, func_name)?;
+                    }
+                }
+
+                self.loop_ctx.pop();
                 self.emit(&format!("({})", l_end));
             }
         }
@@ -1706,7 +2300,8 @@ impl Gen {
 
         if need_draw_char {
             // __draw_char: draw character at text cell.
-            // Inputs: R13=col (0-63), R14=row (0-31), R15=char_code. Return via R3.
+            // Inputs: R13=col (0-63), R14=row (0-22), R15=char_code. Return via R3.
+            // Each character cell is 8 pixels wide × 11 rows tall.
             self.emit("");
             self.emit("// === Runtime: __draw_char ===");
             self.emit("(__draw_char)");
@@ -1719,25 +2314,62 @@ impl Gen {
             self.emit("@R7"); self.emit("M=M+1");
             self.emit("@__dc_div2"); self.emit("0;JMP");
             self.emit("(__dc_div2_done)");
+            // row * 32 * 11 = row * 352
             self.emit("@R14"); self.emit("D=M"); self.emit("@R9"); self.emit("M=D");
-            for _ in 0..8 {
-                self.emit("@R9"); self.emit("D=M"); self.emit("M=D+M");
-            }
-            self.emit(&format!("@{}", 16384)); self.emit("D=A");
-            self.emit("@R9"); self.emit("D=D+M");
+            // multiply R9 by 352 = 256 + 64 + 32
+            // R9 * 256
+            self.emit("@R9"); self.emit("D=M");
+            for _ in 0..8 { self.emit("@R9"); self.emit("D=M"); self.emit("M=D+M"); }
+            // now R9 = row * 256; we need row * (256+64+32) = row*256 + row*64 + row*32
+            // save row * 256 in R10, restore original row
+            self.emit("@R9"); self.emit("D=M"); self.emit("@R10"); self.emit("M=D");
+            self.emit("@R14"); self.emit("D=M"); self.emit("@R9"); self.emit("M=D");
+            // row * 64
+            for _ in 0..6 { self.emit("@R9"); self.emit("D=M"); self.emit("M=D+M"); }
+            self.emit("@R10"); self.emit("D=M"); self.emit("@R9"); self.emit("D=D+M"); self.emit("@R10"); self.emit("M=D");
+            self.emit("@R14"); self.emit("D=M"); self.emit("@R9"); self.emit("M=D");
+            // row * 32
+            for _ in 0..5 { self.emit("@R9"); self.emit("D=M"); self.emit("M=D+M"); }
+            self.emit("@R10"); self.emit("D=M"); self.emit("@R9"); self.emit("D=D+M");
+            // D = row * 352
+            self.emit(&format!("@{}", 16384)); self.emit("D=A+D");
             self.emit("@R7"); self.emit("D=D+M");
             self.emit("@R9"); self.emit("M=D");
+            // font pointer: (char_code - 32) * 11 + FONT_BASE
             self.emit("@R15"); self.emit("D=M");
             self.emit("@32");  self.emit("D=D-A");
             self.emit("@R6");  self.emit("M=D");
-            for _ in 0..3 {
-                self.emit("@R6"); self.emit("D=M"); self.emit("M=D+M");
-            }
+            // multiply R6 by 11 = 8 + 2 + 1
+            self.emit("@R6"); self.emit("D=M"); self.emit("@R11"); self.emit("M=D");
+            for _ in 0..3 { self.emit("@R6"); self.emit("D=M"); self.emit("M=D+M"); }
+            // R6 = (char-32)*8, add (char-32)*2
+            self.emit("@R11"); self.emit("D=M"); self.emit("@R6"); self.emit("D=D+M");
+            // D = (char-32)*3; no wait: R11=(char-32), R6=(char-32)*8
+            // We want *11: 8+2+1
+            // R6 = char*8
+            // D = R11 + R6 = char + char*8 = char*9; not right
+            // Let me just multiply by 11 properly in a loop for simplicity
+            // Reset: R6 = char - 32, multiply by 11
+            self.emit("@R15"); self.emit("D=M");
+            self.emit("@32");  self.emit("D=D-A");
+            self.emit("@R6");  self.emit("M=D");     // R6 = char - 32
+            self.emit("@R11"); self.emit("M=D");     // R11 = char - 32 (accumulator)
+            self.emit("@10");  self.emit("D=A");
+            self.emit("@R10"); self.emit("M=D");     // R10 = 10 (loop counter)
+            self.emit("(__dc_mul11)");
+            self.emit("@R10"); self.emit("D=M");
+            self.emit("@__dc_mul11_done"); self.emit("D;JEQ");
+            self.emit("@R6"); self.emit("D=M");
+            self.emit("@R11"); self.emit("M=D+M");
+            self.emit("@R10"); self.emit("M=M-1");
+            self.emit("@__dc_mul11"); self.emit("0;JMP");
+            self.emit("(__dc_mul11_done)");
             self.emit(&format!("@{}", FONT_BASE)); self.emit("D=A");
-            self.emit("@R6"); self.emit("M=D+M");
+            self.emit("@R11"); self.emit("D=D+M");
+            self.emit("@R6"); self.emit("M=D");
             self.emit("@R5"); self.emit("M=0");
             self.emit("(__dc_row_loop)");
-            self.emit("@R5"); self.emit("D=M"); self.emit("@8"); self.emit("D=D-A");
+            self.emit("@R5"); self.emit("D=M"); self.emit("@11"); self.emit("D=D-A");
             self.emit("@__dc_row_done"); self.emit("D;JGE");
             self.emit("@R6"); self.emit("A=M"); self.emit("D=M");
             self.emit("@R10"); self.emit("M=D");
@@ -1795,6 +2427,147 @@ impl Gen {
             self.emit("(__ds_done)");
             self.emit("@R4"); self.emit("A=M"); self.emit("0;JMP");
         }
+
+        let need_strcpy  = self.used_builtins.contains(&BuiltinKind::Strcpy);
+        let need_strcmp  = self.used_builtins.contains(&BuiltinKind::Strcmp);
+        let need_strcat  = self.used_builtins.contains(&BuiltinKind::Strcat);
+        let need_itoa    = self.used_builtins.contains(&BuiltinKind::Itoa);
+
+        if need_strcpy {
+            // __strcpy: copy src (R14) to dst (R13), including null terminator.
+            // R13 = dst (preserved), R14 = src (advances). Return via R3.
+            // Uses R5 as running dst ptr.
+            self.emit("");
+            self.emit("// === Runtime: __strcpy ===");
+            self.emit("(__strcpy)");
+            self.emit("@R13"); self.emit("D=M"); self.emit("@R5"); self.emit("M=D");
+            self.emit("(__strcpy_loop)");
+            self.emit("@R14"); self.emit("A=M"); self.emit("D=M"); // D = *src
+            self.emit("@R5"); self.emit("A=M"); self.emit("M=D");  // *dst_ptr = D
+            self.emit("@R14"); self.emit("M=M+1");                  // src++
+            self.emit("@R5"); self.emit("M=M+1");                   // dst_ptr++
+            self.emit("@__strcpy_loop"); self.emit("D;JNE");        // loop until null
+            self.emit("@R3"); self.emit("A=M"); self.emit("0;JMP");
+        }
+
+        if need_strcmp {
+            // __strcmp: compare strings at R13 (a) and R14 (b).
+            // Result in R13: negative if a<b, 0 if equal, positive if a>b. Return via R3.
+            // Uses R6 as temp to save *a.
+            self.emit("");
+            self.emit("// === Runtime: __strcmp ===");
+            self.emit("(__strcmp)");
+            self.emit("(__strcmp_loop)");
+            self.emit("@R13"); self.emit("A=M"); self.emit("D=M"); // D = *a
+            self.emit("@R6"); self.emit("M=D");                    // R6 = *a
+            self.emit("@R14"); self.emit("A=M"); self.emit("D=M"); // D = *b
+            self.emit("@R6"); self.emit("D=M-D");                  // D = *a - *b
+            self.emit("@__strcmp_ne"); self.emit("D;JNE");
+            // equal so far — check for null
+            self.emit("@R13"); self.emit("A=M"); self.emit("D=M"); // D = *a
+            self.emit("@__strcmp_done"); self.emit("D;JEQ");       // both null → equal
+            self.emit("@R13"); self.emit("M=M+1");
+            self.emit("@R14"); self.emit("M=M+1");
+            self.emit("@__strcmp_loop"); self.emit("0;JMP");
+            self.emit("(__strcmp_ne)");
+            self.emit("(__strcmp_done)");
+            self.emit("@R13"); self.emit("M=D");
+            self.emit("@R3"); self.emit("A=M"); self.emit("0;JMP");
+        }
+
+        if need_strcat {
+            // __strcat: append src (R14) to end of dst (R13). Return via R3. R13 unchanged.
+            // Uses R5 as running ptr to find and then fill the end of dst.
+            self.emit("");
+            self.emit("// === Runtime: __strcat ===");
+            self.emit("(__strcat)");
+            self.emit("@R13"); self.emit("D=M"); self.emit("@R5"); self.emit("M=D");
+            self.emit("(__strcat_find_end)");
+            self.emit("@R5"); self.emit("A=M"); self.emit("D=M");   // D = *ptr
+            self.emit("@__strcat_copy"); self.emit("D;JEQ");        // found end
+            self.emit("@R5"); self.emit("M=M+1");
+            self.emit("@__strcat_find_end"); self.emit("0;JMP");
+            self.emit("(__strcat_copy)");
+            self.emit("@R14"); self.emit("A=M"); self.emit("D=M");  // D = *src
+            self.emit("@R5"); self.emit("A=M"); self.emit("M=D");   // *dst_end = D
+            self.emit("@R14"); self.emit("M=M+1");
+            self.emit("@R5"); self.emit("M=M+1");
+            self.emit("@__strcat_copy"); self.emit("D;JNE");
+            self.emit("@R3"); self.emit("A=M"); self.emit("0;JMP");
+        }
+
+        if need_itoa {
+            // __itoa: convert int R13 to decimal string in buffer at R14.
+            // Returns original buf address in R14. Return via R3.
+            // R7=write_ptr, R8=buf_start, R9=left_ptr, R10=right_ptr, R11=swap_tmp, R12=sign
+            self.emit("");
+            self.emit("// === Runtime: __itoa ===");
+            self.emit("(__itoa)");
+            // Save buf_start in R8; init write_ptr R7 = buf_start
+            self.emit("@R14"); self.emit("D=M"); self.emit("@R8"); self.emit("M=D");
+            self.emit("@R8");  self.emit("D=M"); self.emit("@R7"); self.emit("M=D");
+            // Determine sign
+            self.emit("@R12"); self.emit("M=0");      // sign = 0 (positive)
+            self.emit("@R13"); self.emit("D=M");
+            self.emit("@__itoa_pos"); self.emit("D;JGE");
+            self.emit("@R12"); self.emit("M=1");      // sign = 1 (negative)
+            self.emit("@R13"); self.emit("M=-M");     // n = abs(n)
+            self.emit("(__itoa_pos)");
+            // Special case: n == 0
+            self.emit("@R13"); self.emit("D=M");
+            self.emit("@__itoa_zero"); self.emit("D;JEQ");
+            // Extract digits (in reverse) using repeated division by 10
+            self.emit("(__itoa_dloop)");
+            self.emit("@R13"); self.emit("D=M");
+            self.emit("@__itoa_dloop_done"); self.emit("D;JEQ");
+            self.emit("@10"); self.emit("D=A"); self.emit("@R14"); self.emit("M=D"); // R14=10
+            self.emit("@__itoa_dr"); self.emit("D=A"); self.emit("@R3"); self.emit("M=D");
+            self.emit("@__div"); self.emit("0;JMP");
+            self.emit("(__itoa_dr)");
+            // R13=quotient, R15=remainder(digit)
+            self.emit("@R15"); self.emit("D=M"); self.emit("@48"); self.emit("D=D+A"); // '0'+digit
+            self.emit("@R7"); self.emit("A=M"); self.emit("M=D"); // *write_ptr = char
+            self.emit("@R7"); self.emit("M=M+1");
+            self.emit("@__itoa_dloop"); self.emit("0;JMP");
+            self.emit("(__itoa_dloop_done)");
+            // Append '-' if negative
+            self.emit("@R12"); self.emit("D=M");
+            self.emit("@__itoa_rev"); self.emit("D;JEQ");
+            self.emit("@45"); self.emit("D=A"); // '-'
+            self.emit("@R7"); self.emit("A=M"); self.emit("M=D");
+            self.emit("@R7"); self.emit("M=M+1");
+            self.emit("(__itoa_rev)");
+            // Null-terminate
+            self.emit("@R7"); self.emit("A=M"); self.emit("M=0");
+            // Reverse: R9=left=buf_start value, R10=right=write_ptr-1 value
+            self.emit("@R8"); self.emit("D=M"); self.emit("@R9"); self.emit("M=D");
+            self.emit("@R7"); self.emit("D=M"); self.emit("D=D-1"); self.emit("@R10"); self.emit("M=D");
+            self.emit("(__itoa_rev_loop)");
+            self.emit("@R9"); self.emit("D=M"); self.emit("@R10"); self.emit("D=D-M");
+            self.emit("@__itoa_rev_done"); self.emit("D;JGE"); // left >= right → done
+            // swap *R9 and *R10
+            self.emit("@R9"); self.emit("A=M"); self.emit("D=M");  // D = *left
+            self.emit("@R11"); self.emit("M=D");                    // R11 = *left
+            self.emit("@R10"); self.emit("A=M"); self.emit("D=M"); // D = *right
+            self.emit("@R9"); self.emit("A=M"); self.emit("M=D");  // *left = *right
+            self.emit("@R11"); self.emit("D=M");
+            self.emit("@R10"); self.emit("A=M"); self.emit("M=D"); // *right = old *left
+            self.emit("@R9"); self.emit("M=M+1");
+            self.emit("@R10"); self.emit("M=M-1");
+            self.emit("@__itoa_rev_loop"); self.emit("0;JMP");
+            self.emit("(__itoa_rev_done)");
+            // Restore R14 = buf_start for caller to return
+            self.emit("@R8"); self.emit("D=M"); self.emit("@R14"); self.emit("M=D");
+            self.emit("@R3"); self.emit("A=M"); self.emit("0;JMP");
+            // Special case: n==0 → write "0\0"
+            self.emit("(__itoa_zero)");
+            self.emit("@48"); self.emit("D=A"); // '0'
+            self.emit("@R7"); self.emit("A=M"); self.emit("M=D");
+            self.emit("@R7"); self.emit("M=M+1");
+            self.emit("@R7"); self.emit("A=M"); self.emit("M=0"); // null
+            self.emit("@R8"); self.emit("D=M"); self.emit("@R14"); self.emit("M=D");
+            self.emit("@R3"); self.emit("A=M"); self.emit("0;JMP");
+        }
     }
 }
 
@@ -1821,12 +2594,23 @@ fn collect_calls_stmt(s: &Stmt, calls: &mut HashSet<String>) {
             collect_calls_expr(c, calls);
             collect_calls_stmt(b, calls);
         }
+        Stmt::DoWhile(b, c) => {
+            collect_calls_stmt(b, calls);
+            collect_calls_expr(c, calls);
+        }
         Stmt::For { init, cond, incr, body } => {
             if let Some(s) = init { collect_calls_stmt(s, calls); }
             if let Some(e) = cond { collect_calls_expr(e, calls); }
             if let Some(e) = incr { collect_calls_expr(e, calls); }
             collect_calls_stmt(body, calls);
         }
+        Stmt::Switch { expr, arms } => {
+            collect_calls_expr(expr, calls);
+            for arm in arms {
+                for s in &arm.stmts { collect_calls_stmt(s, calls); }
+            }
+        }
+        Stmt::Break | Stmt::Continue => {}
         _ => {}
     }
 }
@@ -1841,6 +2625,16 @@ fn collect_calls_expr(e: &Expr, calls: &mut HashSet<String>) {
         Expr::UnOp(_, inner)  => collect_calls_expr(inner, calls),
         Expr::Index(a, b)     => { collect_calls_expr(a, calls); collect_calls_expr(b, calls); }
         Expr::Member(b, _)    => collect_calls_expr(b, calls),
+        Expr::Ternary(c, t, e) => {
+            collect_calls_expr(c, calls);
+            collect_calls_expr(t, calls);
+            collect_calls_expr(e, calls);
+        }
+        Expr::Cast(_, e) => collect_calls_expr(e, calls),
+        Expr::PostInc(e) | Expr::PostDec(e) => collect_calls_expr(e, calls),
+        Expr::InitList(items) => {
+            for item in items { collect_calls_expr(item, calls); }
+        }
         _ => {}
     }
 }
@@ -1864,12 +2658,23 @@ fn scan_builtins_stmt(s: &Stmt, used: &mut HashSet<BuiltinKind>) {
             scan_builtins_expr(c, used);
             scan_builtins_stmt(b, used);
         }
+        Stmt::DoWhile(b, c) => {
+            scan_builtins_stmt(b, used);
+            scan_builtins_expr(c, used);
+        }
         Stmt::For { init, cond, incr, body } => {
             if let Some(s) = init { scan_builtins_stmt(s, used); }
             if let Some(e) = cond { scan_builtins_expr(e, used); }
             if let Some(e) = incr { scan_builtins_expr(e, used); }
             scan_builtins_stmt(body, used);
         }
+        Stmt::Switch { expr, arms } => {
+            scan_builtins_expr(expr, used);
+            for arm in arms {
+                for s in &arm.stmts { scan_builtins_stmt(s, used); }
+            }
+        }
+        Stmt::Break | Stmt::Continue => {}
         _ => {}
     }
 }
@@ -1889,14 +2694,19 @@ fn scan_builtins_expr(e: &Expr, used: &mut HashSet<BuiltinKind>) {
                     used.insert(BuiltinKind::DrawString);
                     used.insert(BuiltinKind::DrawChar); // transitive dependency
                 }
+                "strcpy" => { used.insert(BuiltinKind::Strcpy); }
+                "strcmp" => { used.insert(BuiltinKind::Strcmp); }
+                "strcat" => { used.insert(BuiltinKind::Strcat); }
+                "itoa"   => { used.insert(BuiltinKind::Itoa); used.insert(BuiltinKind::Div); }
                 _ => {}
             }
             for a in args { scan_builtins_expr(a, used); }
         }
         Expr::BinOp(op, l, r) => {
             match op {
-                BinOp::Mul           => { used.insert(BuiltinKind::Mul); }
-                BinOp::Div | BinOp::Mod => { used.insert(BuiltinKind::Div); }
+                BinOp::Mul | BinOp::MulAssign => { used.insert(BuiltinKind::Mul); }
+                BinOp::Div | BinOp::Mod | BinOp::Shr
+                | BinOp::DivAssign | BinOp::ModAssign | BinOp::ShrAssign => { used.insert(BuiltinKind::Div); }
                 _ => {}
             }
             scan_builtins_expr(l, used);
@@ -1905,13 +2715,60 @@ fn scan_builtins_expr(e: &Expr, used: &mut HashSet<BuiltinKind>) {
         Expr::UnOp(_, inner) => scan_builtins_expr(inner, used),
         Expr::Index(a, b)    => { scan_builtins_expr(a, used); scan_builtins_expr(b, used); }
         Expr::Member(b, _)   => scan_builtins_expr(b, used),
+        Expr::Ternary(c, t, e) => {
+            scan_builtins_expr(c, used);
+            scan_builtins_expr(t, used);
+            scan_builtins_expr(e, used);
+        }
+        Expr::Cast(_, e) => scan_builtins_expr(e, used),
+        Expr::PostInc(e) | Expr::PostDec(e) => scan_builtins_expr(e, used),
+        Expr::InitList(items) => {
+            for item in items { scan_builtins_expr(item, used); }
+        }
         _ => {}
     }
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
+/// Compile all functions including the bootstrap (full program, ready to link and emit).
 pub fn generate(sema: SemaResult) -> Result<CompiledProgram, CodegenError> {
+    generate_inner(sema, false)
+}
+
+/// Compile function bodies only — no bootstrap, no entry-point call to main.
+/// Used when producing `.hobj` object files for later linking by `hack_ld`.
+pub fn generate_body_only(sema: SemaResult) -> Result<CompiledProgram, CodegenError> {
+    generate_inner(sema, true)
+}
+
+/// Return the Hack assembly bootstrap that initialises the stack pointer,
+/// calls `main`, and halts.  A `// __DATA_INIT_HERE__` marker is embedded so
+/// `output::emit` can splice in global/string initialisations.
+pub fn gen_bootstrap() -> String {
+    let mut lines: Vec<&str> = Vec::new();
+    let body = [
+        "// Bootstrap",
+        "@256", "D=A", "@SP", "M=D",
+        "// __DATA_INIT_HERE__",
+        "@__ld_main_ret", "D=A",
+        "@SP", "A=M", "M=D", "@SP", "M=M+1",
+        "@LCL",  "D=M", "@SP", "A=M", "M=D", "@SP", "M=M+1",
+        "@ARG",  "D=M", "@SP", "A=M", "M=D", "@SP", "M=M+1",
+        "@THIS", "D=M", "@SP", "A=M", "M=D", "@SP", "M=M+1",
+        "@THAT", "D=M", "@SP", "A=M", "M=D", "@SP", "M=M+1",
+        "@SP", "D=M", "@5", "D=D-A", "@ARG", "M=D",
+        "@SP", "D=M", "@LCL", "M=D",
+        "@main", "0;JMP",
+        "(__ld_main_ret)",
+        "(__end)", "@__end", "0;JMP",
+        "",
+    ];
+    lines.extend_from_slice(&body);
+    lines.join("\n")
+}
+
+fn generate_inner(sema: SemaResult, body_only: bool) -> Result<CompiledProgram, CodegenError> {
     // ── Phase 1: Build call graph; find reachable user functions from main ──
     let func_names: HashSet<String> = sema.funcs.iter().map(|f| f.name.clone()).collect();
     let mut call_graph: HashMap<String, HashSet<String>> = HashMap::new();
@@ -1923,7 +2780,15 @@ pub fn generate(sema: SemaResult) -> Result<CompiledProgram, CodegenError> {
         call_graph.insert(f.name.clone(), user_calls);
     }
     let mut reachable: HashSet<String> = HashSet::new();
-    let mut queue = vec!["main".to_string()];
+    // In body_only mode (separate compilation), every function is a potential
+    // entry point, so seed the BFS with all defined functions.
+    // In whole-program mode, start only from main.
+    let seeds: Vec<String> = if body_only {
+        func_names.iter().cloned().collect()
+    } else {
+        vec!["main".to_string()]
+    };
+    let mut queue = seeds;
     while let Some(name) = queue.pop() {
         if reachable.contains(&name) { continue; }
         reachable.insert(name.clone());
@@ -1949,50 +2814,52 @@ pub fn generate(sema: SemaResult) -> Result<CompiledProgram, CodegenError> {
     // ── Phase 3: Generate code ───────────────────────────────────────────────
     let mut g = Gen::new(sema.string_map.clone(), sema.struct_defs.clone(), used_builtins.clone());
 
-    g.emit("// Bootstrap");
-    g.emit("@256");
-    g.emit("D=A");
-    g.emit("@SP");
-    g.emit("M=D");
-    // Marker: output module inserts data-init code here for asm/hack formats
-    g.emit("// __DATA_INIT_HERE__");
+    if !body_only {
+        g.emit("// Bootstrap");
+        g.emit("@256");
+        g.emit("D=A");
+        g.emit("@SP");
+        g.emit("M=D");
+        // Marker: output module inserts data-init code here for asm/hack formats
+        g.emit("// __DATA_INIT_HERE__");
 
-    // Call main (Jack VM calling convention)
-    let id = g.label();
-    let ret_lbl = format!("main$ret_{}", id);
-    g.emit(&format!("@{}", ret_lbl));
-    g.emit("D=A");
-    g.emit("@SP");
-    g.emit("A=M");
-    g.emit("M=D");
-    g.emit("@SP");
-    g.emit("M=M+1");
-    for reg in &["LCL", "ARG", "THIS", "THAT"] {
-        g.emit(&format!("@{}", reg));
-        g.emit("D=M");
+        // Call main (Jack VM calling convention)
+        let id = g.label();
+        let ret_lbl = format!("main$ret_{}", id);
+        g.emit(&format!("@{}", ret_lbl));
+        g.emit("D=A");
         g.emit("@SP");
         g.emit("A=M");
         g.emit("M=D");
         g.emit("@SP");
         g.emit("M=M+1");
+        for reg in &["LCL", "ARG", "THIS", "THAT"] {
+            g.emit(&format!("@{}", reg));
+            g.emit("D=M");
+            g.emit("@SP");
+            g.emit("A=M");
+            g.emit("M=D");
+            g.emit("@SP");
+            g.emit("M=M+1");
+        }
+        g.emit("@SP");
+        g.emit("D=M");
+        g.emit("@5");
+        g.emit("D=D-A");
+        g.emit("@ARG");
+        g.emit("M=D");
+        g.emit("@SP");
+        g.emit("D=M");
+        g.emit("@LCL");
+        g.emit("M=D");
+        g.emit("@main");
+        g.emit("0;JMP");
+        g.emit(&format!("({})", ret_lbl));
+        g.emit("(__end)");
+        g.emit("@__end");
+        g.emit("0;JMP");
+        g.emit("");
     }
-    g.emit("@SP");
-    g.emit("D=M");
-    g.emit("@5");
-    g.emit("D=D-A");
-    g.emit("@ARG");
-    g.emit("M=D");
-    g.emit("@SP");
-    g.emit("D=M");
-    g.emit("@LCL");
-    g.emit("M=D");
-    g.emit("@main");
-    g.emit("0;JMP");
-    g.emit(&format!("({})", ret_lbl));
-    g.emit("(__end)");
-    g.emit("@__end");
-    g.emit("0;JMP");
-    g.emit("");
 
     // Emit only reachable user-defined functions
     for f in &sema.funcs {
@@ -2002,8 +2869,9 @@ pub fn generate(sema: SemaResult) -> Result<CompiledProgram, CodegenError> {
         }
     }
 
-    // Runtime subroutines (gated on used_builtins)
-    g.emit_runtime();
+    // Runtime subroutines are now resolved by the linker (linker.rs).
+    // emit_runtime() is no longer called here.
+
 
     let asm = g.out.join("\n") + "\n";
 
@@ -2031,12 +2899,13 @@ pub fn generate(sema: SemaResult) -> Result<CompiledProgram, CodegenError> {
     // Font table — only if draw_char or draw_string is used
     if used_builtins.contains(&BuiltinKind::DrawChar) {
         for ch_idx in 0..96usize {
-            for row in 0..8usize {
-                let byte = FONT_8X8[ch_idx][row];
-                let reversed = byte.reverse_bits();
-                if reversed == 0 { continue; }
-                let addr = (FONT_BASE + ch_idx * 8 + row) as u16;
-                data.push(DataInit { address: addr, value: reversed as i16 });
+            for row in 0..11usize {
+                let byte = FONT_8X11[ch_idx][row];
+                // Jack OS font already uses bit-0=leftmost, matching Hack screen format.
+                // No reversal needed.
+                if byte == 0 { continue; }
+                let addr = (FONT_BASE + ch_idx * 11 + row) as u16;
+                data.push(DataInit { address: addr, value: byte as i16 });
             }
         }
     }
