@@ -108,6 +108,7 @@ fn main() {
     let prog = CompiledProgram {
         asm: linked_asm,
         data: combined_data,
+        next_var_addr: 16,  // standalone .s files use default variable base
     };
 
     let fmt_enum = cli.format.or_else(|| {

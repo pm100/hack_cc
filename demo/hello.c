@@ -6,6 +6,7 @@
  * Compile: hack_cc hello.c
  * Run:     hack_emu hello.hack
  */
+#define HACK_OUTPUT_SCREEN
 #include <hack.h>
 
 int main() {

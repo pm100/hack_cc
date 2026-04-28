@@ -99,6 +99,14 @@ fn predefined() -> HashMap<String, i16> {
 }
 
 fn assemble(src: &str) -> Result<Vec<Instr>, String> {
+    assemble_with_var_base(src, 16)
+}
+
+/// Assemble Hack assembly text, allocating named variables starting at `var_base`.
+/// Use `var_base = prog.next_var_addr` when assembling compiler output with C static
+/// data at RAM[16..next_var_addr], to prevent runtime named variables from colliding
+/// with string literals and global variables.
+fn assemble_with_var_base(src: &str, var_base: i16) -> Result<Vec<Instr>, String> {
     let mut symbols = predefined();
 
     // ── Pass 1: collect labels ───────────────────────────────────────────
@@ -115,7 +123,7 @@ fn assemble(src: &str) -> Result<Vec<Instr>, String> {
     }
 
     // ── Pass 2: emit instructions ────────────────────────────────────────
-    let mut next_var_addr = 16i16;
+    let mut next_var_addr = var_base;
     let mut rom = Vec::new();
 
     for line in src.lines() {
@@ -153,6 +161,138 @@ fn assemble(src: &str) -> Result<Vec<Instr>, String> {
     }
 
     Ok(rom)
+}
+
+// ── Hackem format support ─────────────────────────────────────────────────────
+
+/// Decode a 16-bit machine word into a Hack instruction.
+fn decode_word(w: u16) -> Result<Instr, String> {
+    if w & 0x8000 == 0 {
+        Ok(Instr::A((w & 0x7FFF) as i16))
+    } else {
+        let comp_bits = (w >> 6) & 0x7F;
+        let dest_bits = (w >> 3) & 0x07;
+        let jump_bits = w & 0x07;
+        let comp = decode_comp(comp_bits)?;
+        let dest = decode_dest(dest_bits).to_string();
+        let jump = decode_jump(jump_bits).to_string();
+        Ok(Instr::C { comp, dest, jump })
+    }
+}
+
+fn decode_comp(bits: u16) -> Result<String, String> {
+    Ok(match bits {
+        0b0_101010 => "0",
+        0b0_111111 => "1",
+        0b0_111010 => "-1",
+        0b0_001100 => "D",
+        0b0_110000 => "A",
+        0b1_110000 => "M",
+        0b0_001101 => "!D",
+        0b0_110001 => "!A",
+        0b1_110001 => "!M",
+        0b0_001111 => "-D",
+        0b0_110011 => "-A",
+        0b1_110011 => "-M",
+        0b0_011111 => "D+1",
+        0b0_110111 => "A+1",
+        0b1_110111 => "M+1",
+        0b0_001110 => "D-1",
+        0b0_110010 => "A-1",
+        0b1_110010 => "M-1",
+        0b0_000010 => "D+A",
+        0b1_000010 => "D+M",
+        0b0_010011 => "D-A",
+        0b1_010011 => "D-M",
+        0b0_000111 => "A-D",
+        0b1_000111 => "M-D",
+        0b0_000000 => "D&A",
+        0b1_000000 => "D&M",
+        0b0_010101 => "D|A",
+        0b1_010101 => "D|M",
+        other => return Err(format!("unknown comp bits: 0b{:07b}", other)),
+    }.to_string())
+}
+
+fn decode_dest(bits: u16) -> &'static str {
+    match bits {
+        0b000 => "",
+        0b001 => "M",
+        0b010 => "D",
+        0b011 => "MD",
+        0b100 => "A",
+        0b101 => "AM",
+        0b110 => "AD",
+        0b111 => "AMD",
+        _ => "",
+    }
+}
+
+fn decode_jump(bits: u16) -> &'static str {
+    match bits {
+        0b000 => "",
+        0b001 => "JGT",
+        0b010 => "JEQ",
+        0b011 => "JGE",
+        0b100 => "JLT",
+        0b101 => "JNE",
+        0b110 => "JLE",
+        0b111 => "JMP",
+        _ => "",
+    }
+}
+
+/// Load a `.hackem` file: returns (ROM instructions, initial RAM contents).
+fn load_hackem(src: &str) -> Result<(Vec<Instr>, Vec<i16>), String> {
+    let mut lines = src.lines().peekable();
+
+    // Parse header: "hackem v1.0 0xXXXX"
+    let header = lines.next().ok_or("empty hackem file")?;
+    if !header.starts_with("hackem v1.0") {
+        return Err(format!("not a hackem file: {:?}", header));
+    }
+
+    let mut rom: Vec<Instr> = Vec::new();
+    let mut ram = vec![0i16; RAM_SIZE];
+    let mut in_rom = false;
+    let mut ram_base: usize = 0;
+    let mut ram_cursor: usize = 0;
+
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+
+        if let Some(addr_hex) = line.strip_prefix("ROM@") {
+            let _ = u32::from_str_radix(addr_hex, 16)
+                .map_err(|_| format!("bad ROM@ address: {}", addr_hex))?;
+            in_rom = true;
+            continue;
+        }
+
+        if let Some(addr_hex) = line.strip_prefix("RAM@") {
+            let addr = usize::from_str_radix(addr_hex, 16)
+                .map_err(|_| format!("bad RAM@ address: {}", addr_hex))?;
+            ram_base = addr;
+            ram_cursor = addr;
+            in_rom = false;
+            continue;
+        }
+
+        let word = u16::from_str_radix(line, 16)
+            .map_err(|_| format!("bad hex word: {:?}", line))?;
+
+        if in_rom {
+            rom.push(decode_word(word)?);
+        } else {
+            if ram_cursor < RAM_SIZE {
+                ram[ram_cursor] = word as i16;
+            }
+            ram_cursor += 1;
+            let _ = ram_base; // suppress unused warning
+        }
+    }
+
+    Ok((rom, ram))
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -355,16 +495,30 @@ fn main() {
         std::process::exit(1);
     });
 
-    let rom = assemble(&src).unwrap_or_else(|e| {
-        eprintln!("assemble error: {}", e);
-        std::process::exit(1);
-    });
+    let (rom, initial_ram) = if src.starts_with("hackem v1.0") {
+        load_hackem(&src).unwrap_or_else(|e| {
+            eprintln!("hackem load error: {}", e);
+            std::process::exit(1);
+        })
+    } else {
+        let instr = assemble(&src).unwrap_or_else(|e| {
+            eprintln!("assemble error: {}", e);
+            std::process::exit(1);
+        });
+        (instr, vec![0i16; RAM_SIZE])
+    };
 
     if !args.quiet {
         println!("Loaded {} instructions from {:?}", rom.len(), args.path);
     }
 
     let mut cpu = Cpu::new();
+    // Pre-load RAM for hackem format (font data, string literals, etc.)
+    for (i, &v) in initial_ram.iter().enumerate() {
+        if v != 0 && i < RAM_SIZE {
+            cpu.ram[i] = v;
+        }
+    }
     let mut cycles = 0u64;
     let mut halted = false;
 
@@ -443,7 +597,10 @@ mod tests {
         let full_asm = emit(&prog, OutputFormat::Asm)
             .unwrap_or_else(|e| panic!("emit error: {}", e))
             .main;
-        let rom = assemble(&full_asm)
+        // Use prog.next_var_addr as the variable base so that runtime named variables
+        // (e.g. __con_col, __con_row) are allocated ABOVE C string literals and globals,
+        // preventing address collision with data at RAM[16..next_var_addr].
+        let rom = assemble_with_var_base(&full_asm, prog.next_var_addr as i16)
             .unwrap_or_else(|e| panic!("assemble error: {}", e));
         let mut cpu = Cpu::new();
         let mut cycles = 0u64;
@@ -880,6 +1037,24 @@ mod tests {
         assert!( pixel_set(&ram, 2, 0), "pixel (2,0) set by draw_string 'A'");
         assert!( pixel_set(&ram, 3, 0), "pixel (3,0) set by draw_string 'A'");
         assert!(!pixel_set(&ram, 7, 0), "pixel (7,0) clear");
+    }
+
+    /// Regression test: puts_screen() with a string literal must not have
+    /// address collision between C data (string at RAM[16+]) and runtime named
+    /// variables (__con_col, __con_row, etc. also allocated near RAM[16]).
+    /// Before the fix, __con_row ended up at the address holding ASCII ',' from
+    /// "Hello, World!" → row=44 → no pixels were rendered (blank screen).
+    #[test]
+    fn test_puts_screen_no_collision() {
+        let (ret, _, ram) = compile_and_run_ext(
+            r#"int main() { puts_screen("Hello, World!"); return 0; }"#,
+            8_000_000,
+        );
+        assert_eq!(ret, 0);
+        // At least some pixels must be set: "Hello" starts at col=0, row=0.
+        // 'H' row0=0x33=51 → bits 0,1,4,5 set → pixels (0,0) and (1,0).
+        assert!(pixel_set(&ram, 0, 0), "pixel (0,0) should be set for 'H' row0 (no var collision)");
+        assert!(pixel_set(&ram, 1, 0), "pixel (1,0) should be set for 'H' row0 (no var collision)");
     }
 
     // ── Struct tests ─────────────────────────────────────────────────────

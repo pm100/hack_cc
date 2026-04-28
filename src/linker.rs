@@ -24,7 +24,6 @@ pub fn runtime_library() -> Vec<RuntimeModule> {
     vec![
         RuntimeModule { provides: "__mul".into(),          text: include_str!("runtime/math/__mul.s") },
         RuntimeModule { provides: "__div".into(),          text: include_str!("runtime/math/__div.s") },
-        RuntimeModule { provides: "__puts".into(),         text: include_str!("runtime/io/__puts.s") },
         RuntimeModule { provides: "__strlen".into(),       text: include_str!("runtime/io/__strlen.s") },
         RuntimeModule { provides: "__strcpy".into(),       text: include_str!("runtime/io/__strcpy.s") },
         RuntimeModule { provides: "__strcmp".into(),       text: include_str!("runtime/io/__strcmp.s") },
@@ -45,7 +44,45 @@ pub fn runtime_library() -> Vec<RuntimeModule> {
         RuntimeModule { provides: "sys_wait".into(),       text: include_str!("runtime/sys/sys_wait.s") },
         RuntimeModule { provides: "draw_line".into(),      text: include_str!("runtime/screen/draw_line.s") },
         RuntimeModule { provides: "draw_rect".into(),      text: include_str!("runtime/screen/draw_rect.s") },
-        RuntimeModule { provides: "fill_rect".into(),      text: include_str!("runtime/screen/fill_rect.s") },
+        RuntimeModule { provides: "fill_rect".into(),       text: include_str!("runtime/screen/fill_rect.s") },
+        RuntimeModule { provides: "clear_rect".into(),      text: include_str!("runtime/screen/clear_rect.s") },
+        // IO wrappers (VM-convention) — port output
+        RuntimeModule { provides: "__puts".into(),          text: include_str!("runtime/io/__puts.s") },
+        RuntimeModule { provides: "putchar".into(),         text: include_str!("runtime/io/putchar.s") },
+        RuntimeModule { provides: "puts".into(),            text: include_str!("runtime/io/puts.s") },
+        // Screen-output alternatives: linked when putchar_screen/puts_screen are called
+        RuntimeModule { provides: "__console_putchar".into(), text: include_str!("runtime/io/__console_putchar.s") },
+        RuntimeModule { provides: "__puts_screen".into(),   text: include_str!("runtime/io/__puts_screen.s") },
+        RuntimeModule { provides: "putchar_screen".into(),  text: include_str!("runtime/io/putchar_screen.s") },
+        RuntimeModule { provides: "puts_screen".into(),     text: include_str!("runtime/io/puts_screen.s") },
+        RuntimeModule { provides: "strlen".into(),          text: include_str!("runtime/io/strlen.s") },
+        RuntimeModule { provides: "strcpy".into(),          text: include_str!("runtime/io/strcpy.s") },
+        RuntimeModule { provides: "strcmp".into(),          text: include_str!("runtime/io/strcmp.s") },
+        RuntimeModule { provides: "strcat".into(),          text: include_str!("runtime/io/strcat.s") },
+        RuntimeModule { provides: "itoa".into(),            text: include_str!("runtime/io/itoa.s") },
+        RuntimeModule { provides: "atoi".into(),            text: include_str!("runtime/io/atoi.s") },
+        RuntimeModule { provides: "strchr".into(),          text: include_str!("runtime/io/strchr.s") },
+        // Memory utilities
+        RuntimeModule { provides: "memset".into(),          text: include_str!("runtime/memory/memset.s") },
+        RuntimeModule { provides: "memcpy".into(),          text: include_str!("runtime/memory/memcpy.s") },
+        // RNG
+        RuntimeModule { provides: "rand".into(),            text: include_str!("runtime/sys/rand.s") },
+        RuntimeModule { provides: "srand".into(),           text: include_str!("runtime/sys/srand.s") },
+        // Misc wrappers (VM-convention)
+        RuntimeModule { provides: "abs".into(),            text: include_str!("runtime/misc/abs.s") },
+        RuntimeModule { provides: "min".into(),            text: include_str!("runtime/misc/min.s") },
+        RuntimeModule { provides: "max".into(),            text: include_str!("runtime/misc/max.s") },
+        // Keyboard wrappers (VM-convention)
+        RuntimeModule { provides: "read_key".into(),       text: include_str!("runtime/keyboard/read_key.s") },
+        RuntimeModule { provides: "getchar".into(),        text: include_str!("runtime/keyboard/getchar.s") },
+        // Screen VM-convention wrappers
+        RuntimeModule { provides: "draw_pixel".into(),     text: include_str!("runtime/screen/draw_pixel.s") },
+        RuntimeModule { provides: "clear_pixel".into(),    text: include_str!("runtime/screen/clear_pixel.s") },
+        RuntimeModule { provides: "fill_screen".into(),    text: include_str!("runtime/screen/fill_screen.s") },
+        RuntimeModule { provides: "clear_screen".into(),   text: include_str!("runtime/screen/clear_screen.s") },
+        RuntimeModule { provides: "draw_char".into(),      text: include_str!("runtime/screen/draw_char.s") },
+        RuntimeModule { provides: "draw_string".into(),    text: include_str!("runtime/screen/draw_string.s") },
+        RuntimeModule { provides: "print_at".into(),       text: include_str!("runtime/screen/print_at.s") },
     ]
 }
 

@@ -56,6 +56,8 @@ M=D+M
 @R9
 D=M
 M=D+M
+@R9
+D=M
 @R10
 M=D
 @R14
@@ -110,7 +112,7 @@ D=M
 @R9
 D=D+M
 @16384
-D=A+D
+D=D+A
 @R7
 D=D+M
 @R9

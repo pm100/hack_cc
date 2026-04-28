@@ -100,6 +100,8 @@ pub enum Stmt {
     Break,
     Continue,
     Switch { expr: Expr, arms: Vec<SwitchArm> },
+    Goto(String),
+    Label(String, Box<Stmt>),
 }
 
 #[derive(Debug, Clone)]
@@ -534,6 +536,22 @@ impl Parser {
                 self.typedef_map.insert(name, ty);
                 Ok(Stmt::Block(vec![]))
             }
+            TokenKind::Semicolon => {
+                self.advance();
+                Ok(Stmt::Block(vec![]))
+            }
+            TokenKind::KwGoto => {
+                self.advance();
+                let lbl = self.expect_ident()?;
+                self.expect(&TokenKind::Semicolon)?;
+                Ok(Stmt::Goto(lbl))
+            }
+            TokenKind::Ident(name) if *self.peek_at(1) == TokenKind::Colon => {
+                self.advance(); // consume ident
+                self.advance(); // consume ':'
+                let stmt = self.parse_stmt()?;
+                Ok(Stmt::Label(name, Box::new(stmt)))
+            }
             _ if self.is_type_start() => self.parse_decl_stmt(),
             _ => {
                 let e = self.parse_expr()?;
@@ -574,6 +592,11 @@ impl Parser {
             return Ok(Stmt::Block(vec![]));
         }
         let (ty, name) = self.parse_typed_decl()?;
+        // Local function declaration: `int foo(int a);` inside a function body.
+        if *self.peek() == TokenKind::LParen {
+            let _ = self.parse_func_rest(ty, name)?;
+            return Ok(Stmt::Block(vec![]));
+        }
         let init = if self.eat(&TokenKind::Assign) {
             if *self.peek() == TokenKind::LBrace {
                 Some(self.parse_init_list()?)

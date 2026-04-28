@@ -93,7 +93,7 @@ fn emit_asm(prog: &CompiledProgram) -> Result<EmitResult, String> {
 
 fn emit_hack(prog: &CompiledProgram) -> Result<EmitResult, String> {
     let full_asm = asm_with_data(prog);
-    let words = assembler::assemble(&full_asm).map_err(|e| e.to_string())?;
+    let words = assembler::assemble_with_base(&full_asm, prog.next_var_addr).map_err(|e| e.to_string())?;
     let binary = words_to_binary_strings(&words);
     Ok(EmitResult { main: binary, hack_companion: None })
 }
@@ -101,7 +101,7 @@ fn emit_hack(prog: &CompiledProgram) -> Result<EmitResult, String> {
 fn emit_hackem(prog: &CompiledProgram) -> Result<EmitResult, String> {
     // Assemble code WITHOUT the data bootstrap (data goes in RAM@ sections instead)
     let code_asm = asm_without_data(prog);
-    let words = assembler::assemble(&code_asm).map_err(|e| e.to_string())?;
+    let words = assembler::assemble_with_base(&code_asm, prog.next_var_addr).map_err(|e| e.to_string())?;
 
     // Locate the halt address (ROM address of the `(__end)` label)
     let halt = find_label_addr(&code_asm, "__end").unwrap_or(0);
@@ -121,7 +121,7 @@ fn emit_hackem(prog: &CompiledProgram) -> Result<EmitResult, String> {
 fn emit_tst(prog: &CompiledProgram) -> Result<EmitResult, String> {
     // The .hack companion: code only, data pre-loaded by the .tst script
     let code_asm = asm_without_data(prog);
-    let words = assembler::assemble(&code_asm).map_err(|e| e.to_string())?;
+    let words = assembler::assemble_with_base(&code_asm, prog.next_var_addr).map_err(|e| e.to_string())?;
     let binary = words_to_binary_strings(&words);
 
     // Build the .tst script

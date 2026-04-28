@@ -40,7 +40,7 @@ D;JEQ
 @R13
 D=M
 @R15
-M=M+D
+M=D+M
 @R14
 M=M-1
 @__mul_loop

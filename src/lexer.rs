@@ -47,6 +47,7 @@ pub enum TokenKind {
     KwConst,
     KwExtern,
     KwStatic,
+    KwGoto,
     // Punctuation
     LParen,
     RParen,
@@ -219,6 +220,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     "extern"    => TokenKind::KwExtern,
                     "static"    => TokenKind::KwStatic,
                     "signed"    => TokenKind::KwSigned,
+                    "goto"      => TokenKind::KwGoto,
                     _           => TokenKind::Ident(word.to_string()),
                 };
                 tokens.push(Token { kind, line: sl, col: sc });

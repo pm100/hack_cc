@@ -47,6 +47,9 @@ pub struct SemaResult {
     pub string_map: HashMap<String, usize>,
     /// Struct definitions: name -> ordered list of (field_name, field_type).
     pub struct_defs: HashMap<String, Vec<(String, Type)>>,
+    /// First RAM address not used by globals or string literals.
+    /// The assembler must allocate named variables at or above this address.
+    pub next_var_addr: usize,
 }
 
 /// Compute the size in Hack words of a type, resolving struct sizes via struct_defs.
@@ -145,20 +148,24 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
     const KNOWN_EXTERNALS: &[&str] = &[
         // Inline codegen builtins (no library needed)
         "abs", "min", "max", "read_key",
-        // I/O builtins
-        "putchar", "puts", "strlen",
+        // I/O builtins — port output
+        "putchar", "puts",
+        // I/O builtins — screen output (selected via -D HACK_OUTPUT_SCREEN in hack.h)
+        "putchar_screen", "puts_screen",
+        // String / I/O
+        "strlen", "getchar",
         "draw_pixel", "clear_pixel", "fill_screen", "clear_screen",
         "draw_char", "draw_string", "print_at",
         // Runtime library (resolved by linker from src/runtime/)
         "strcpy", "strcmp", "strcat", "itoa",
-        "draw_line", "draw_rect", "fill_rect",
+        "draw_line", "draw_rect", "fill_rect", "clear_rect",
         "malloc", "free", "sys_wait",
     ];
     for af in &funcs_out {
         check_calls_defined_ext(&af.body, &defined_funcs, KNOWN_EXTERNALS, user_externals)?;
     }
 
-    Ok(SemaResult { globals: globals_out, funcs: funcs_out, func_sigs, string_literals, string_map, struct_defs })
+    Ok(SemaResult { globals: globals_out, funcs: funcs_out, func_sigs, string_literals, string_map, struct_defs, next_var_addr: next_global_addr })
 }
 
 fn eval_const(expr: &Expr) -> Result<i32, SemaError> {
@@ -417,7 +424,8 @@ fn collect_locals_stmt(
                 collect_locals(&arm.stmts, vars, next_idx, struct_defs)?;
             }
         }
-        Stmt::Return(_) | Stmt::Expr(_) | Stmt::Break | Stmt::Continue => {}
+        Stmt::Return(_) | Stmt::Expr(_) | Stmt::Break | Stmt::Continue | Stmt::Goto(_) => {}
+        Stmt::Label(_, stmt) => collect_locals_stmt(stmt, vars, next_idx, struct_defs)?,
     }
     Ok(())
 }
@@ -631,6 +639,10 @@ fn alpha_rename_stmt(
         }
         Stmt::Expr(e) => alpha_rename_expr(e, scopes),
         Stmt::Break | Stmt::Continue => {}
+        Stmt::Goto(_) => {}
+        Stmt::Label(_, stmt) => {
+            alpha_rename_stmt(stmt, counters, scopes);
+        }
         Stmt::Switch { expr, arms } => {
             alpha_rename_expr(expr, scopes);
             for arm in arms {

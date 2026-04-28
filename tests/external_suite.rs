@@ -29,7 +29,6 @@ const MAX_CYCLES: &str = "5000000";
 
 /// Sub-directory names that are always skipped.
 const SKIP_SUBDIRS: &[&str] = &[
-    "extra_credit", // bitwise ops, ternary, goto, switch, labels — unsupported
     "libraries",    // multi-file programs — single-file compiler only
 ];
 

@@ -1,6 +1,8 @@
 use clap::Parser;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use hack_cc::output::{OutputFormat, emit};
+use hack_cc::CompileOptions;
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum Format {
@@ -21,6 +23,9 @@ struct Cli {
     /// merged before compilation (like a simple linker).
     #[arg(required = true)]
     inputs: Vec<PathBuf>,
+    /// Additional include search directories for #include <...> (may be repeated)
+    #[arg(short = 'I', value_name = "DIR")]
+    include_dirs: Vec<PathBuf>,
     /// Output file (default: derived from first input name)
     #[arg(short, long)]
     output: Option<PathBuf>,
@@ -31,6 +36,10 @@ struct Cli {
     /// Use hack_ld to link one or more .hobj files into a final executable.
     #[arg(short = 'c', long = "compile-only")]
     compile_only: bool,
+    /// Pre-define a macro (like -DNAME or -DNAME=VALUE).
+    /// Use -D HACK_OUTPUT_SCREEN to select screen-buffer output.
+    #[arg(short = 'D', value_name = "NAME[=VALUE]")]
+    defines: Vec<String>,
 }
 
 fn main() {
@@ -93,15 +102,29 @@ fn main() {
         Format::Tst    => OutputFormat::Tst,
     };
 
+    // Parse -D defines into a map.
+    let mut defines: HashMap<String, String> = HashMap::new();
+    for d in &cli.defines {
+        if let Some((name, value)) = d.split_once('=') {
+            defines.insert(name.to_string(), value.to_string());
+        } else {
+            defines.insert(d.clone(), "1".to_string());
+        }
+    }
+    let opts = CompileOptions {
+        include_dirs: cli.include_dirs.clone(),
+        defines,
+    };
+
     let prog = if sources.len() == 1 {
         let (src, path) = &sources[0];
-        hack_cc::compile_with_path(src, path.parent())
+        hack_cc::compile_with_full_options(src, path.parent(), &opts)
     } else {
         // Multi-file: pass each (source, base_dir) pair to compile_files.
         let file_refs: Vec<(&str, Option<&std::path::Path>)> = sources.iter()
             .map(|(src, path)| (src.as_str(), path.parent()))
             .collect();
-        hack_cc::compile_files(&file_refs)
+        hack_cc::compile_files_with_full_options(&file_refs, &opts)
     }.unwrap_or_else(|e| {
         eprintln!("compile error: {}", e);
         std::process::exit(1);

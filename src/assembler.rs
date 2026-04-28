@@ -16,7 +16,9 @@ impl AssembleError {
 }
 
 /// Assemble Hack assembly source text into a vector of 16-bit machine words.
-pub fn assemble(asm: &str) -> Result<Vec<u16>, AssembleError> {
+/// Named variables are allocated starting at `var_base` (typically 16 for standalone
+/// assembly, but must be set above C static data when assembling compiler output).
+pub fn assemble_with_base(asm: &str, var_base: u16) -> Result<Vec<u16>, AssembleError> {
     // Predefined symbols
     let mut symbols: HashMap<String, u16> = HashMap::new();
     symbols.insert("SP".into(), 0);
@@ -49,7 +51,7 @@ pub fn assemble(asm: &str) -> Result<Vec<u16>, AssembleError> {
 
     // Pass 2: emit machine words
     let mut code: Vec<u16> = Vec::with_capacity(rom_addr as usize);
-    let mut var_addr: u16 = 16; // unresolved symbols allocated here
+    let mut var_addr: u16 = var_base; // unresolved symbols allocated here
 
     for line in &lines {
         let line = strip_comment(line).trim();
@@ -79,6 +81,13 @@ pub fn assemble(asm: &str) -> Result<Vec<u16>, AssembleError> {
     }
 
     Ok(code)
+}
+
+/// Assemble Hack assembly source with the standard variable base of 16.
+/// Use `assemble_with_base` when assembling compiler output that has C static data
+/// starting at RAM[16], to avoid naming collisions.
+pub fn assemble(asm: &str) -> Result<Vec<u16>, AssembleError> {
+    assemble_with_base(asm, 16)
 }
 
 fn strip_comment(line: &str) -> &str {

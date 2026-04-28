@@ -10,55 +10,14 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// Distinguishes `#include "..."` (relative) from `#include <...>` (system).
+enum IncludeKind {
+    Relative(String),
+    System(String),
+}
 use thiserror::Error;
 
-/// Built-in virtual header <hack.h> — declarations for all Hack platform builtins.
-const HACK_H_SOURCE: &str = r#"
-#ifndef __HACK_H__
-#define __HACK_H__
-
-/* --- basic I/O --- */
-int putchar(int c);
-int puts(char *s);
-int read_key(void);
-
-/* --- screen (pixels) --- */
-void draw_pixel(int x, int y);
-void clear_pixel(int x, int y);
-void fill_screen(void);
-void clear_screen(void);
-
-/* --- text rendering --- */
-void draw_char(char *str_ptr, int col, int row);
-void draw_string(int col, int row, char *s);
-void print_at(int col, int row, char *s);
-
-/* --- math --- */
-int abs(int x);
-int min(int a, int b);
-int max(int a, int b);
-
-/* --- string functions --- */
-char *strcpy(char *dst, char *src);
-int   strcmp(char *a, char *b);
-char *strcat(char *dst, char *src);
-int   strlen(char *s);
-char *itoa(int n, char *buf);
-
-/* --- graphics helpers --- */
-void draw_line(int x1, int y1, int x2, int y2);
-void draw_rect(int x, int y, int w, int h);
-void fill_rect(int x, int y, int w, int h);
-
-/* --- memory --- */
-void *malloc(int n);
-void free(void *ptr);
-
-/* --- system --- */
-void sys_wait(int ms);
-
-#endif /* __HACK_H__ */
-"#;
 
 #[derive(Debug, Error, Clone)]
 #[error("preprocessor error at {file}:{line}: {msg}")]
@@ -82,14 +41,45 @@ struct MacroDef {
 }
 
 /// Preprocess `source`, resolving `#include "..."` relative to `base_dir`.
-/// If `base_dir` is `None`, `#include` directives will error if attempted.
+/// If `base_dir` is `None`, relative `#include` directives will error if attempted.
 pub fn preprocess(source: &str, base_dir: Option<&Path>) -> Result<String, PreprocError> {
+    preprocess_with_dirs(source, base_dir, &[])
+}
+
+/// Like [`preprocess`], but also searches `include_dirs` when resolving
+/// angle-bracket includes (`#include <name.h>`).  `<hack.h>` is always
+/// available as a built-in regardless of `include_dirs`.
+pub fn preprocess_with_dirs(
+    source: &str,
+    base_dir: Option<&Path>,
+    include_dirs: &[PathBuf],
+) -> Result<String, PreprocError> {
     let file_name = base_dir
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "<input>".to_string());
     let mut ctx = PreprocCtx::new();
-    ctx.expand_source(source, &file_name, base_dir, 0)
+    ctx.expand_source(source, &file_name, base_dir, include_dirs, 0)
+}
+
+/// Like [`preprocess_with_dirs`], but also accepts pre-defined macros (equivalent to
+/// `-D NAME=VALUE` on the command line).  Each entry is injected before any source
+/// processing, exactly as if `#define NAME VALUE` appeared at the top of the file.
+pub fn preprocess_with_predefined(
+    source: &str,
+    base_dir: Option<&Path>,
+    include_dirs: &[PathBuf],
+    predefined: &HashMap<String, String>,
+) -> Result<String, PreprocError> {
+    let file_name = base_dir
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "<input>".to_string());
+    let mut ctx = PreprocCtx::new();
+    for (name, value) in predefined {
+        ctx.macros.insert(name.clone(), MacroDef { params: None, body: value.clone() });
+    }
+    ctx.expand_source(source, &file_name, base_dir, include_dirs, 0)
 }
 
 struct PreprocCtx {
@@ -106,6 +96,7 @@ impl PreprocCtx {
         source: &str,
         file: &str,
         base_dir: Option<&Path>,
+        include_dirs: &[PathBuf],
         depth: u32,
     ) -> Result<String, PreprocError> {
         if depth > 64 {
@@ -198,31 +189,46 @@ impl PreprocCtx {
                             output.push('\n');
                             continue;
                         }
-                        let path_str = parse_include_path(args, file, line_no)?;
-                        // Virtual built-in headers
-                        if path_str == "__builtin__/hack.h" {
-                            let expanded = self.expand_source(
-                                HACK_H_SOURCE,
-                                "<hack.h>",
-                                None,
-                                depth + 1,
-                            )?;
-                            output.push_str(&expanded);
-                            continue;
+                        match parse_include_path(args, file, line_no)? {
+                            IncludeKind::System(name) => {
+                                let found = include_dirs.iter().find_map(|dir| {
+                                    let p = dir.join(&name);
+                                    if p.exists() { Some(p) } else { None }
+                                });
+                                let inc_path = found.ok_or_else(|| {
+                                    PreprocError::new(file, line_no, format!("cannot find <{}> (use -I to add include directories)", name))
+                                })?;
+                                let content = std::fs::read_to_string(&inc_path).map_err(|e| {
+                                    PreprocError::new(file, line_no, format!("cannot read {:?}: {}", inc_path, e))
+                                })?;
+                                let inc_base = inc_path.parent().map(Path::to_path_buf);
+                                let inc_name = inc_path.to_string_lossy().into_owned();
+                                let expanded = self.expand_source(
+                                    &content,
+                                    &inc_name,
+                                    inc_base.as_deref(),
+                                    include_dirs,
+                                    depth + 1,
+                                )?;
+                                output.push_str(&expanded);
+                            }
+                            IncludeKind::Relative(path_str) => {
+                                let inc_path = resolve_include(&path_str, base_dir, file, line_no)?;
+                                let content = std::fs::read_to_string(&inc_path).map_err(|e| {
+                                    PreprocError::new(file, line_no, format!("cannot read {:?}: {}", inc_path, e))
+                                })?;
+                                let inc_base = inc_path.parent().map(Path::to_path_buf);
+                                let inc_name = inc_path.to_string_lossy().into_owned();
+                                let expanded = self.expand_source(
+                                    &content,
+                                    &inc_name,
+                                    inc_base.as_deref(),
+                                    include_dirs,
+                                    depth + 1,
+                                )?;
+                                output.push_str(&expanded);
+                            }
                         }
-                        let inc_path = resolve_include(&path_str, base_dir, file, line_no)?;
-                        let content = std::fs::read_to_string(&inc_path).map_err(|e| {
-                            PreprocError::new(file, line_no, format!("cannot read {:?}: {}", inc_path, e))
-                        })?;
-                        let inc_base = inc_path.parent().map(Path::to_path_buf);
-                        let inc_name = inc_path.to_string_lossy().into_owned();
-                        let expanded = self.expand_source(
-                            &content,
-                            &inc_name,
-                            inc_base.as_deref(),
-                            depth + 1,
-                        )?;
-                        output.push_str(&expanded);
                     }
                     _ => {
                         // Unknown directive: emit as blank line if active, skip otherwise
@@ -345,6 +351,23 @@ impl PreprocCtx {
                 out.push_str(&text[i..]);
                 break;
             }
+            // Skip block comments without expanding macros inside them
+            if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                out.push('/');
+                out.push('*');
+                i += 2;
+                while i < bytes.len() {
+                    if bytes[i] == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                        out.push('*');
+                        out.push('/');
+                        i += 2;
+                        break;
+                    }
+                    out.push(bytes[i] as char);
+                    i += 1;
+                }
+                continue;
+            }
             // Identifier?
             if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
                 let start = i;
@@ -428,18 +451,12 @@ fn split_directive(s: &str) -> (&str, &str) {
     (&s[..end], &s[end..])
 }
 
-fn parse_include_path(args: &str, file: &str, line: u32) -> Result<String, PreprocError> {
+fn parse_include_path(args: &str, file: &str, line: u32) -> Result<IncludeKind, PreprocError> {
     let args = args.trim();
     if args.starts_with('"') && args.ends_with('"') && args.len() >= 2 {
-        Ok(args[1..args.len() - 1].to_string())
-    } else if args.starts_with('<') && args.ends_with('>') {
-        // Allow <hack.h> as a virtual system header; others still unsupported
-        let name = &args[1..args.len() - 1];
-        if name == "hack.h" {
-            Ok("__builtin__/hack.h".to_string())
-        } else {
-            Err(PreprocError::new(file, line, "#include <system> headers are not supported"))
-        }
+        Ok(IncludeKind::Relative(args[1..args.len() - 1].to_string()))
+    } else if args.starts_with('<') && args.ends_with('>') && args.len() >= 3 {
+        Ok(IncludeKind::System(args[1..args.len() - 1].to_string()))
     } else {
         Err(PreprocError::new(file, line, "malformed #include path"))
     }
