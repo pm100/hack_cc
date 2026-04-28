@@ -1,2 +1,0 @@
-as low.s;mv a.out ../low.o
-cc -c -O conf.c;mv conf.o ../conf.o
