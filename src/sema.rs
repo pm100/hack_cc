@@ -22,8 +22,8 @@ pub enum VarStorage {
     Local(usize),
     /// Offset from ARG base (index, 0-based)
     Param(usize),
-    /// Absolute RAM address
-    Global(usize),
+    /// Assembler symbol name (e.g. `__g_count`); address resolved by assembler
+    Global(String),
 }
 
 #[derive(Debug, Clone)]
@@ -38,18 +38,15 @@ pub struct AnnotatedFunc {
 
 #[derive(Debug, Clone)]
 pub struct SemaResult {
-    pub globals: Vec<(String, usize, Type, Option<i32>)>, // name, addr, ty, init
+    pub globals: Vec<(String, Type, Option<i32>)>, // name, ty, init
     pub funcs: Vec<AnnotatedFunc>,
     pub func_sigs: HashMap<String, (Type, usize)>, // name -> (ret_ty, n_params)
-    /// RAM address and char values (without null terminator) for each string literal.
-    pub string_literals: Vec<(usize, Vec<i16>)>,
-    /// Map from string content to its RAM address (for codegen lookup).
-    pub string_map: HashMap<String, usize>,
+    /// Symbol prefix and char values (without null terminator) for each string literal.
+    pub string_literals: Vec<(String, Vec<i16>)>,
+    /// Map from string content to its assembler symbol prefix (for codegen lookup).
+    pub string_map: HashMap<String, String>,
     /// Struct definitions: name -> ordered list of (field_name, field_type).
     pub struct_defs: HashMap<String, Vec<(String, Type)>>,
-    /// First RAM address not used by globals or string literals.
-    /// The assembler must allocate named variables at or above this address.
-    pub next_var_addr: usize,
 }
 
 /// Compute the size in Hack words of a type, resolving struct sizes via struct_defs.
@@ -88,38 +85,36 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
         struct_defs.insert(sd.name.clone(), fields);
     }
 
-    // Assign global variable addresses starting at RAM[16]
-    let mut next_global_addr = 16usize;
+    // Assign global variable symbols (assembler resolves addresses)
     let mut global_map: HashMap<String, VarInfo> = HashMap::new();
     let mut globals_out = Vec::new();
 
     for (ty, name, init_expr) in &prog.globals {
-        let addr = next_global_addr;
-        let size = type_size(ty, &struct_defs).max(1);
-        next_global_addr += size;
+        let sym = format!("__g_{}", name);
         let init_val = match init_expr {
             Some(e) => Some(eval_const(e)?),
             None => None,
         };
         global_map.insert(name.clone(), VarInfo {
             ty: ty.clone(),
-            storage: VarStorage::Global(addr),
+            storage: VarStorage::Global(sym),
         });
-        globals_out.push((name.clone(), addr, ty.clone(), init_val));
+        globals_out.push((name.clone(), ty.clone(), init_val));
     }
 
     // Collect string literals from all function bodies (and global inits)
-    let mut string_map: HashMap<String, usize> = HashMap::new();
-    let mut string_literals: Vec<(usize, Vec<i16>)> = Vec::new();
+    let mut string_map: HashMap<String, String> = HashMap::new();
+    let mut string_literals: Vec<(String, Vec<i16>)> = Vec::new();
+    let mut str_counter = 0usize;
     for (_, _, init_expr) in &prog.globals {
         if let Some(e) = init_expr {
-            collect_strings_expr(e, &mut string_map, &mut string_literals, &mut next_global_addr);
+            collect_strings_expr(e, &mut string_map, &mut string_literals, &mut str_counter);
         }
     }
     for f in &prog.funcs {
         if f.is_decl { continue; }
         for stmt in &f.body {
-            collect_strings_stmt(stmt, &mut string_map, &mut string_literals, &mut next_global_addr);
+            collect_strings_stmt(stmt, &mut string_map, &mut string_literals, &mut str_counter);
         }
     }
 
@@ -146,7 +141,7 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
         check_calls_defined_ext(&af.body, &defined_funcs, &[], user_externals)?;
     }
 
-    Ok(SemaResult { globals: globals_out, funcs: funcs_out, func_sigs, string_literals, string_map, struct_defs, next_var_addr: next_global_addr })
+    Ok(SemaResult { globals: globals_out, funcs: funcs_out, func_sigs, string_literals, string_map, struct_defs })
 }
 
 fn eval_const(expr: &Expr) -> Result<i32, SemaError> {
@@ -368,49 +363,49 @@ pub fn desugar_compound(op: &BinOp, lhs: Expr, rhs: Expr) -> Expr {
 
 fn intern_string(
     s: &str,
-    map: &mut HashMap<String, usize>,
-    lits: &mut Vec<(usize, Vec<i16>)>,
-    next_addr: &mut usize,
+    map: &mut HashMap<String, String>,
+    lits: &mut Vec<(String, Vec<i16>)>,
+    counter: &mut usize,
 ) {
     if !map.contains_key(s) {
-        let addr = *next_addr;
+        let sym_prefix = format!("__str_{}", *counter);
+        *counter += 1;
         let chars: Vec<i16> = s.bytes().map(|b| b as i16).collect();
-        *next_addr += chars.len() + 1; // +1 for null terminator slot
-        map.insert(s.to_string(), addr);
-        lits.push((addr, chars));
+        map.insert(s.to_string(), sym_prefix.clone());
+        lits.push((sym_prefix, chars));
     }
 }
 
 fn collect_strings_expr(
     expr: &Expr,
-    map: &mut HashMap<String, usize>,
-    lits: &mut Vec<(usize, Vec<i16>)>,
-    next_addr: &mut usize,
+    map: &mut HashMap<String, String>,
+    lits: &mut Vec<(String, Vec<i16>)>,
+    counter: &mut usize,
 ) {
     match expr {
-        Expr::StringLit(s) => intern_string(s, map, lits, next_addr),
+        Expr::StringLit(s) => intern_string(s, map, lits, counter),
         Expr::BinOp(_, l, r) => {
-            collect_strings_expr(l, map, lits, next_addr);
-            collect_strings_expr(r, map, lits, next_addr);
+            collect_strings_expr(l, map, lits, counter);
+            collect_strings_expr(r, map, lits, counter);
         }
-        Expr::UnOp(_, e) => collect_strings_expr(e, map, lits, next_addr),
+        Expr::UnOp(_, e) => collect_strings_expr(e, map, lits, counter),
         Expr::Call(_, args) => {
-            for a in args { collect_strings_expr(a, map, lits, next_addr); }
+            for a in args { collect_strings_expr(a, map, lits, counter); }
         }
         Expr::Index(a, b) => {
-            collect_strings_expr(a, map, lits, next_addr);
-            collect_strings_expr(b, map, lits, next_addr);
+            collect_strings_expr(a, map, lits, counter);
+            collect_strings_expr(b, map, lits, counter);
         }
-        Expr::Member(base, _) => collect_strings_expr(base, map, lits, next_addr),
+        Expr::Member(base, _) => collect_strings_expr(base, map, lits, counter),
         Expr::Ternary(c, t, e) => {
-            collect_strings_expr(c, map, lits, next_addr);
-            collect_strings_expr(t, map, lits, next_addr);
-            collect_strings_expr(e, map, lits, next_addr);
+            collect_strings_expr(c, map, lits, counter);
+            collect_strings_expr(t, map, lits, counter);
+            collect_strings_expr(e, map, lits, counter);
         }
-        Expr::Cast(_, e) => collect_strings_expr(e, map, lits, next_addr),
-        Expr::PostInc(e) | Expr::PostDec(e) => collect_strings_expr(e, map, lits, next_addr),
+        Expr::Cast(_, e) => collect_strings_expr(e, map, lits, counter),
+        Expr::PostInc(e) | Expr::PostDec(e) => collect_strings_expr(e, map, lits, counter),
         Expr::InitList(items) => {
-            for item in items { collect_strings_expr(item, map, lits, next_addr); }
+            for item in items { collect_strings_expr(item, map, lits, counter); }
         }
         Expr::Num(_) | Expr::Ident(_) | Expr::Sizeof(_) => {}
     }
@@ -418,40 +413,40 @@ fn collect_strings_expr(
 
 fn collect_strings_stmt(
     stmt: &Stmt,
-    map: &mut HashMap<String, usize>,
-    lits: &mut Vec<(usize, Vec<i16>)>,
-    next_addr: &mut usize,
+    map: &mut HashMap<String, String>,
+    lits: &mut Vec<(String, Vec<i16>)>,
+    counter: &mut usize,
 ) {
     match stmt {
-        Stmt::Expr(e) => collect_strings_expr(e, map, lits, next_addr),
-        Stmt::Return(Some(e)) => collect_strings_expr(e, map, lits, next_addr),
-        Stmt::Decl(_, _, Some(e)) => collect_strings_expr(e, map, lits, next_addr),
+        Stmt::Expr(e) => collect_strings_expr(e, map, lits, counter),
+        Stmt::Return(Some(e)) => collect_strings_expr(e, map, lits, counter),
+        Stmt::Decl(_, _, Some(e)) => collect_strings_expr(e, map, lits, counter),
         Stmt::Block(stmts) => {
-            for s in stmts { collect_strings_stmt(s, map, lits, next_addr); }
+            for s in stmts { collect_strings_stmt(s, map, lits, counter); }
         }
         Stmt::If(cond, then, els) => {
-            collect_strings_expr(cond, map, lits, next_addr);
-            collect_strings_stmt(then, map, lits, next_addr);
-            if let Some(e) = els { collect_strings_stmt(e, map, lits, next_addr); }
+            collect_strings_expr(cond, map, lits, counter);
+            collect_strings_stmt(then, map, lits, counter);
+            if let Some(e) = els { collect_strings_stmt(e, map, lits, counter); }
         }
         Stmt::While(cond, body) => {
-            collect_strings_expr(cond, map, lits, next_addr);
-            collect_strings_stmt(body, map, lits, next_addr);
+            collect_strings_expr(cond, map, lits, counter);
+            collect_strings_stmt(body, map, lits, counter);
         }
         Stmt::DoWhile(body, cond) => {
-            collect_strings_stmt(body, map, lits, next_addr);
-            collect_strings_expr(cond, map, lits, next_addr);
+            collect_strings_stmt(body, map, lits, counter);
+            collect_strings_expr(cond, map, lits, counter);
         }
         Stmt::For { init, cond, incr, body } => {
-            if let Some(s) = init { collect_strings_stmt(s, map, lits, next_addr); }
-            if let Some(e) = cond { collect_strings_expr(e, map, lits, next_addr); }
-            if let Some(e) = incr { collect_strings_expr(e, map, lits, next_addr); }
-            collect_strings_stmt(body, map, lits, next_addr);
+            if let Some(s) = init { collect_strings_stmt(s, map, lits, counter); }
+            if let Some(e) = cond { collect_strings_expr(e, map, lits, counter); }
+            if let Some(e) = incr { collect_strings_expr(e, map, lits, counter); }
+            collect_strings_stmt(body, map, lits, counter);
         }
         Stmt::Switch { expr, arms } => {
-            collect_strings_expr(expr, map, lits, next_addr);
+            collect_strings_expr(expr, map, lits, counter);
             for arm in arms {
-                for s in &arm.stmts { collect_strings_stmt(s, map, lits, next_addr); }
+                for s in &arm.stmts { collect_strings_stmt(s, map, lits, counter); }
             }
         }
         Stmt::Break | Stmt::Continue => {}

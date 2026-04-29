@@ -1,31 +1,28 @@
 /// hack_ld — Hack linker.
 ///
-/// Links one or more `.hobj` object files (produced by `hack_cc -c`) into
+/// Links one or more `.s` object files (produced by `hack_cc -c`) into
 /// a final executable.
 ///
 /// Usage:
-///   hack_ld [options] file1.hobj [file2.hobj ...]
+///   hack_ld [options] file1.s [file2.s ...]
 ///
 /// Options:
-///   -o <output>     Output file (default: derived from first input)
-///   -f, --format    Output format: asm (default), hackem, hack, tst
+///   -o <output>       Output file (default: derived from first input)
+///   -L <dir>          Library search directory (default: auto-discovered)
+///   -f, --format      Output format: asm (default), hackem, hack, tst
 ///
 /// The linker:
-///   1. Reads all .hobj files.
-///   2. Merges their ASM bodies and DataInit entries.
-///      (Warns if two TUs have overlapping DataInit addresses — use
-///       `hack_cc file1.c file2.c` instead for programs with cross-file globals.)
-///   3. Generates a bootstrap (SP init, call main, halt) with the combined
-///      data initialisations spliced in.
-///   4. Runs the runtime symbol-scan linker to pull in needed runtime modules.
+///   1. Reads all .s files and parses their `.provides` and `.data` directives.
+///   2. Merges their `.data` entries (symbolic name-value pairs) in file order.
+///   3. Generates a bootstrap (SP init, data init code, call main, halt).
+///   4. Runs the runtime symbol-scan linker to pull in needed library modules.
 ///   5. Emits the requested output format.
 
 use clap::Parser;
 use std::path::PathBuf;
 use hack_cc::output::{OutputFormat, emit};
-use hack_cc::codegen::{gen_bootstrap, CompiledProgram, DataInit};
-use hack_cc::linker::link;
-use hack_cc::object::ObjectFile;
+use hack_cc::codegen::{gen_bootstrap, CompiledProgram};
+use hack_cc::linker::{link, default_lib_dirs};
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum Format {
@@ -40,11 +37,14 @@ enum Format {
 }
 
 #[derive(Parser)]
-#[command(name = "hack_ld", about = "Linker for Hack object files (.hobj)")]
+#[command(name = "hack_ld", about = "Linker for Hack object files (.s)")]
 struct Cli {
-    /// Input .hobj object files
+    /// Input .s object files (produced by hack_cc -c)
     #[arg(required = true)]
     inputs: Vec<PathBuf>,
+    /// Library search directories (may be repeated)
+    #[arg(short = 'L', value_name = "DIR")]
+    lib_dirs: Vec<PathBuf>,
     /// Output file (default: derived from first input name)
     #[arg(short, long)]
     output: Option<PathBuf>,
@@ -53,62 +53,96 @@ struct Cli {
     format: Option<Format>,
 }
 
+/// Metadata parsed from the leading directive lines of a `.s` object file.
+struct ParsedSFile {
+    /// Symbolic name-value pairs from `.data name val` directives.
+    data: Vec<(String, i16)>,
+    /// Full file text (directive lines are valid assembler no-ops, pass-through).
+    asm_text: String,
+}
+
+fn parse_s_file(text: String) -> ParsedSFile {
+    let mut data = Vec::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix(".data ") {
+            let mut parts = rest.split_whitespace();
+            if let (Some(name), Some(val_str)) = (parts.next(), parts.next()) {
+                // Skip absolute font-table entries (format: `.data @addr val`)
+                if name.starts_with('@') { continue; }
+                if let Ok(v) = val_str.parse::<i16>() {
+                    data.push((name.to_string(), v));
+                }
+            }
+        }
+    }
+    ParsedSFile { data, asm_text: text }
+}
+
+/// Generate Hack assembly init code from symbolic name-value pairs.
+/// Zero-value entries just emit `@sym` to force assembler allocation.
+fn gen_init_code(data: &[(String, i16)]) -> String {
+    let mut out = String::new();
+    for (name, val) in data {
+        let v = *val;
+        if v == 0 {
+            out.push_str(&format!("@{}\n", name));
+        } else if v == 1 {
+            out.push_str(&format!("D=1\n@{}\nM=D\n", name));
+        } else if v == -1 {
+            out.push_str(&format!("D=-1\n@{}\nM=D\n", name));
+        } else if v > 0 {
+            out.push_str(&format!("@{}\nD=A\n@{}\nM=D\n", v, name));
+        } else {
+            out.push_str(&format!("@{}\nD=-A\n@{}\nM=D\n", -(v as i32), name));
+        }
+    }
+    out
+}
+
 fn main() {
     let cli = Cli::parse();
 
-    // ── Step 1: Read and parse all .hobj files ───────────────────────────────
-    let mut objects: Vec<ObjectFile> = Vec::new();
+    let lib_dirs = if cli.lib_dirs.is_empty() {
+        default_lib_dirs()
+    } else {
+        cli.lib_dirs.clone()
+    };
+
+    // ── Step 1: Read and parse all .s files ─────────────────────────────────
+    let mut parsed: Vec<ParsedSFile> = Vec::new();
     for path in &cli.inputs {
         let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
             eprintln!("error reading {:?}: {}", path, e);
             std::process::exit(1);
         });
-        let obj = ObjectFile::parse(&text).unwrap_or_else(|e| {
-            eprintln!("error parsing {:?}: {}", path, e);
-            std::process::exit(1);
-        });
-        objects.push(obj);
+        parsed.push(parse_s_file(text));
     }
 
-    // ── Step 2: Merge DataInit — detect conflicts ────────────────────────────
-    let mut combined_data: Vec<DataInit> = Vec::new();
-    let mut seen_addrs: std::collections::HashMap<u16, (usize, i16)> = std::collections::HashMap::new();
-    for (file_idx, obj) in objects.iter().enumerate() {
-        for d in &obj.data {
-            if let Some(&(prev_idx, prev_val)) = seen_addrs.get(&d.address) {
-                if prev_val != d.value {
-                    eprintln!(
-                        "warning: DataInit conflict at RAM[{}]: \
-                         file {} sets {}, file {} sets {} — \
-                         programs with global variables across separately-compiled TUs \
-                         should be built with `hack_cc file1.c file2.c ...` instead.",
-                        d.address, prev_idx, prev_val, file_idx, d.value
-                    );
-                }
-                // Keep first definition, skip duplicate.
-            } else {
-                seen_addrs.insert(d.address, (file_idx, d.value));
-                combined_data.push(d.clone());
-            }
+    // ── Step 2: Merge .data entries from all files (in file order) ──────────
+    let mut combined_data: Vec<(String, i16)> = Vec::new();
+    for sf in &parsed {
+        for entry in &sf.data {
+            combined_data.push(entry.clone());
         }
     }
 
-    // ── Step 3: Build combined ASM ───────────────────────────────────────────
-    let bootstrap = gen_bootstrap();
+    // ── Step 3: Build combined ASM with bootstrap containing init code ───────
+    let init_code = gen_init_code(&combined_data);
+    let bootstrap = gen_bootstrap(&init_code);
     let mut combined_asm = bootstrap;
-    for obj in &objects {
+    for sf in &parsed {
         combined_asm.push('\n');
-        combined_asm.push_str(&obj.asm_body);
+        combined_asm.push_str(&sf.asm_text);
     }
 
     // ── Step 4: Runtime symbol-scan linker ──────────────────────────────────
-    let linked_asm = link(&combined_asm);
+    let linked_asm = link(&combined_asm, &lib_dirs);
 
     // ── Step 5: Wrap into CompiledProgram and emit ───────────────────────────
+    // No DataInit entries (font table only comes from whole-program compilation)
     let prog = CompiledProgram {
         asm: linked_asm,
-        data: combined_data,
-        next_var_addr: 16,  // standalone .s files use default variable base
+        data: Vec::new(),
     };
 
     let fmt_enum = cli.format.or_else(|| {

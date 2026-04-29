@@ -26,14 +26,17 @@ struct Cli {
     /// Additional include search directories for #include <...> (may be repeated)
     #[arg(short = 'I', value_name = "DIR")]
     include_dirs: Vec<PathBuf>,
+    /// Library search directories for the linker (may be repeated)
+    #[arg(short = 'L', value_name = "DIR")]
+    lib_dirs: Vec<PathBuf>,
     /// Output file (default: derived from first input name)
     #[arg(short, long)]
     output: Option<PathBuf>,
     /// Output format (inferred from -o extension if not specified)
     #[arg(short, long, value_enum)]
     format: Option<Format>,
-    /// Compile only: produce a .hobj object file without linking or bootstrap.
-    /// Use hack_ld to link one or more .hobj files into a final executable.
+    /// Compile only: produce a .s object file without linking or bootstrap.
+    /// Use hack_ld to link one or more .s files into a final executable.
     #[arg(short = 'c', long = "compile-only")]
     compile_only: bool,
     /// Pre-define a macro (like -DNAME or -DNAME=VALUE).
@@ -46,7 +49,7 @@ fn main() {
     let cli = Cli::parse();
 
     if cli.compile_only {
-        // -c mode: compile each input to a separate .hobj file.
+        // -c mode: compile each input to a separate .s object file.
         if cli.output.is_some() && cli.inputs.len() > 1 {
             eprintln!("error: -o cannot be used with -c when compiling multiple files");
             std::process::exit(1);
@@ -56,16 +59,16 @@ fn main() {
                 eprintln!("error reading {:?}: {}", input, e);
                 std::process::exit(1);
             });
-            let obj = hack_cc::compile_to_object(&src, input.parent()).unwrap_or_else(|e| {
+            let obj_s = hack_cc::compile_to_object(&src, input.parent()).unwrap_or_else(|e| {
                 eprintln!("compile error in {:?}: {}", input, e);
                 std::process::exit(1);
             });
             let out_path = if cli.inputs.len() == 1 {
-                cli.output.clone().unwrap_or_else(|| input.with_extension("hobj"))
+                cli.output.clone().unwrap_or_else(|| input.with_extension("s"))
             } else {
-                input.with_extension("hobj")
+                input.with_extension("s")
             };
-            std::fs::write(&out_path, obj.serialize()).unwrap_or_else(|e| {
+            std::fs::write(&out_path, obj_s).unwrap_or_else(|e| {
                 eprintln!("error writing {:?}: {}", out_path, e);
                 std::process::exit(1);
             });
@@ -111,16 +114,21 @@ fn main() {
             defines.insert(d.clone(), "1".to_string());
         }
     }
+    let lib_dirs = if cli.lib_dirs.is_empty() {
+        hack_cc::linker::default_lib_dirs()
+    } else {
+        cli.lib_dirs.clone()
+    };
     let opts = CompileOptions {
         include_dirs: cli.include_dirs.clone(),
         defines,
+        lib_dirs,
     };
 
     let prog = if sources.len() == 1 {
         let (src, path) = &sources[0];
         hack_cc::compile_with_full_options(src, path.parent(), &opts)
     } else {
-        // Multi-file: pass each (source, base_dir) pair to compile_files.
         let file_refs: Vec<(&str, Option<&std::path::Path>)> = sources.iter()
             .map(|(src, path)| (src.as_str(), path.parent()))
             .collect();
@@ -136,7 +144,6 @@ fn main() {
         OutputFormat::Hack   => "hack",
         OutputFormat::Tst    => "tst",
     };
-    // Default output name derived from first input file.
     let out_path = cli.output.unwrap_or_else(|| {
         cli.inputs[0].with_extension(default_ext)
     });

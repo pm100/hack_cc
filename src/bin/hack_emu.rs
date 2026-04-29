@@ -614,10 +614,9 @@ mod tests {
         let full_asm = emit(&prog, OutputFormat::Asm)
             .unwrap_or_else(|e| panic!("emit error: {}", e))
             .main;
-        // Use prog.next_var_addr as the variable base so that runtime named variables
-        // (e.g. __con_col, __con_row) are allocated ABOVE C string literals and globals,
-        // preventing address collision with data at RAM[16..next_var_addr].
-        let rom = assemble_with_var_base(&full_asm, prog.next_var_addr as i16)
+        // All globals use symbolic names (__g_name) so they get unique RAM addresses
+        // allocated by the assembler. Start variable allocation at 16 (default).
+        let rom = assemble_with_var_base(&full_asm, 16)
             .unwrap_or_else(|e| panic!("assemble error: {}", e));
         let mut cpu = Cpu::new();
         let mut cycles = 0u64;
@@ -1079,7 +1078,7 @@ int main() { puts_screen("Hello, World!"); return 0; }"#,
         let full_asm = emit(&prog, OutputFormat::Asm)
             .unwrap_or_else(|e| panic!("emit error: {}", e))
             .main;
-        let rom = assemble_with_var_base(&full_asm, prog.next_var_addr as i16)
+        let rom = assemble_with_var_base(&full_asm, 16)
             .unwrap_or_else(|e| panic!("assemble error: {}", e));
         let mut cpu = Cpu::new();
         let mut cycles = 0u64;
@@ -1384,11 +1383,14 @@ int main() { puts("hi"); return 0; }"#, None, &opts).unwrap();
     }
 
     #[test]
-    fn test_hackem_has_ram_section_for_globals() {
+    fn test_hackem_global_initialized_in_bootstrap() {
         use hack_cc::output::{emit, OutputFormat};
         let prog = hack_cc::compile("int g = 42; int main() { return g; }").unwrap();
-        let result = emit(&prog, OutputFormat::Hackem).unwrap();
-        assert!(result.main.contains("RAM@"), "initialized global should produce RAM@ section");
+        // Globals are now initialized inline in bootstrap code (not RAM@ sections).
+        // Verify the assembly contains the symbol and initializer value.
+        let result = emit(&prog, OutputFormat::Asm).unwrap();
+        assert!(result.main.contains("@__g_g"), "global should produce symbolic reference");
+        assert!(result.main.contains("@42"), "global initializer value should appear in bootstrap");
     }
 
     #[test]

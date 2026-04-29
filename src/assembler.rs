@@ -40,6 +40,7 @@ pub fn assemble_with_base(asm: &str, var_base: u16) -> Result<Vec<u16>, Assemble
     for line in &lines {
         let line = strip_comment(line).trim();
         if line.is_empty() { continue; }
+        if line.starts_with('.') { continue; } // assembler directives (no instruction)
         if let Some(label) = line.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
             symbols.insert(label.to_string(), rom_addr);
         } else {
@@ -56,6 +57,7 @@ pub fn assemble_with_base(asm: &str, var_base: u16) -> Result<Vec<u16>, Assemble
     for line in &lines {
         let line = strip_comment(line).trim();
         if line.is_empty() { continue; }
+        if line.starts_with('.') { continue; } // assembler directives (no instruction)
         if line.starts_with('(') { continue; } // label definition, not an instruction
 
         let word = if let Some(sym) = line.strip_prefix('@') {

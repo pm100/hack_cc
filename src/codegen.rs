@@ -141,15 +141,11 @@ pub struct DataInit {
 
 /// Full result of code generation returned by [`generate`].
 pub struct CompiledProgram {
-    /// Hack assembly text containing a `// __DATA_INIT_HERE__` marker in the bootstrap
-    /// section where data-initialisation code should be inserted for asm/hack formats.
+    /// Hack assembly text with bootstrap code (including data initialization).
     pub asm: String,
-    /// RAM data initialisations (globals, string literals, font table if used).
+    /// RAM data initialisations for the font table only (globals/strings are
+    /// initialized inline in the bootstrap code).
     pub data: Vec<DataInit>,
-    /// First RAM address NOT used by C globals or string literals.
-    /// The assembler must start its named-variable allocator here (or higher) to
-    /// avoid overwriting C static data.
-    pub next_var_addr: u16,
 }
 
 #[derive(Debug, Error)]
@@ -163,14 +159,14 @@ impl CodegenError {
 struct Gen {
     out: Vec<String>,
     label_id: usize,
-    string_map: HashMap<String, usize>,
+    string_map: HashMap<String, String>,
     struct_defs: HashMap<String, Vec<(String, Type)>>,
     loop_ctx: Vec<(String, String)>,   // (break_label, continue_label)
 }
 
 impl Gen {
     fn new(
-        string_map: HashMap<String, usize>,
+        string_map: HashMap<String, String>,
         struct_defs: HashMap<String, Vec<(String, Type)>>,
     ) -> Self {
         Self { out: Vec::new(), label_id: 0, string_map, struct_defs, loop_ctx: Vec::new() }
@@ -278,8 +274,8 @@ impl Gen {
                 }
                 self.push_d();
             }
-            VarStorage::Global(addr) => {
-                self.emit(&format!("@{}", addr));
+            VarStorage::Global(sym) => {
+                self.emit(&format!("@{}", sym));
                 self.emit("D=M");
                 self.push_d();
             }
@@ -315,8 +311,8 @@ impl Gen {
                 }
                 self.push_d();
             }
-            VarStorage::Global(addr) => {
-                self.emit(&format!("@{}", addr));
+            VarStorage::Global(sym) => {
+                self.emit(&format!("@{}", sym));
                 self.emit("D=A");
                 self.push_d();
             }
@@ -414,10 +410,10 @@ impl Gen {
             }
 
             Expr::StringLit(s) => {
-                let addr = *self.string_map.get(s).ok_or_else(|| {
+                let sym = self.string_map.get(s).ok_or_else(|| {
                     CodegenError::new(format!("unknown string literal {:?}", s))
-                })?;
-                self.emit(&format!("@{}", addr));
+                })?.clone();
+                self.emit(&format!("@{}", sym));
                 self.emit("D=A");
                 self.push_d();
             }
@@ -1081,17 +1077,12 @@ impl Gen {
                 self.emit("A=M");
                 self.emit("M=D");
             }
-            VarStorage::Global(addr) => {
-                // save target address in D, then store
-                self.emit(&format!("@{}", addr));
-                self.emit("D=A");           // D = global address
-                self.emit("@R14");
-                self.emit("M=D");           // R14 = global address (R13 has value)
+            VarStorage::Global(sym) => {
+                // R13 has the value; store directly to named global
                 self.emit("@R13");
-                self.emit("D=M");           // D = value
-                self.emit("@R14");
-                self.emit("A=M");           // A = global address
-                self.emit("M=D");           // RAM[addr] = value
+                self.emit("D=M");
+                self.emit(&format!("@{}", sym));
+                self.emit("M=D");
             }
         }
     }
@@ -1295,9 +1286,13 @@ impl Gen {
                                     self.emit("A=M");
                                     self.emit("M=D");
                                 }
-                                VarStorage::Global(base) => {
-                                    let addr = base + i;
-                                    self.emit(&format!("@{}", addr));
+                                VarStorage::Global(sym) => {
+                                    let elem_sym = if i == 0 {
+                                        sym.clone()
+                                    } else {
+                                        format!("{}_{}", sym, i)
+                                    };
+                                    self.emit(&format!("@{}", elem_sym));
                                     self.emit("D=A");
                                     self.emit("@R14");
                                     self.emit("M=D");
@@ -1682,6 +1677,33 @@ fn collect_calls_expr(e: &Expr, calls: &mut HashSet<String>) {
 }
 // ── Entry point ──────────────────────────────────────────────────────────────
 
+/// Emit assembly to initialize a named RAM symbol to a given value.
+/// If `val == 0`, just emits `@sym` to force the assembler to allocate the slot.
+fn emit_init_value(g: &mut Gen, val: i16, sym: &str) {
+    if val == 0 {
+        g.emit(&format!("@{}", sym));
+    } else if val == 1 {
+        g.emit("D=1");
+        g.emit(&format!("@{}", sym));
+        g.emit("M=D");
+    } else if val == -1 {
+        g.emit("D=-1");
+        g.emit(&format!("@{}", sym));
+        g.emit("M=D");
+    } else if val > 0 {
+        g.emit(&format!("@{}", val));
+        g.emit("D=A");
+        g.emit(&format!("@{}", sym));
+        g.emit("M=D");
+    } else {
+        // negative: load absolute value, negate
+        g.emit(&format!("@{}", -(val as i32)));
+        g.emit("D=-A");
+        g.emit(&format!("@{}", sym));
+        g.emit("M=D");
+    }
+}
+
 /// Compile all functions including the bootstrap (full program, ready to link and emit).
 pub fn generate(sema: SemaResult) -> Result<CompiledProgram, CodegenError> {
     generate_inner(sema, false)
@@ -1694,14 +1716,20 @@ pub fn generate_body_only(sema: SemaResult) -> Result<CompiledProgram, CodegenEr
 }
 
 /// Return the Hack assembly bootstrap that initialises the stack pointer,
-/// calls `main`, and halts.  A `// __DATA_INIT_HERE__` marker is embedded so
-/// `output::emit` can splice in global/string initialisations.
-pub fn gen_bootstrap() -> String {
-    let mut lines: Vec<&str> = Vec::new();
-    let body = [
-        "// Bootstrap",
-        "@256", "D=A", "@SP", "M=D",
-        "// __DATA_INIT_HERE__",
+/// calls `main`, and halts.  `init_code` is inserted between the SP
+/// initialization and the call to `main` — use it to initialize global
+/// variables and string literals.
+pub fn gen_bootstrap(init_code: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push("// Bootstrap".to_string());
+    lines.push("@256".to_string());
+    lines.push("D=A".to_string());
+    lines.push("@SP".to_string());
+    lines.push("M=D".to_string());
+    if !init_code.is_empty() {
+        lines.push(init_code.trim_end().to_string());
+    }
+    let tail: &[&str] = &[
         "@__ld_main_ret", "D=A",
         "@SP", "A=M", "M=D", "@SP", "M=M+1",
         "@LCL",  "D=M", "@SP", "A=M", "M=D", "@SP", "M=M+1",
@@ -1715,7 +1743,9 @@ pub fn gen_bootstrap() -> String {
         "(__end)", "@__end", "0;JMP",
         "",
     ];
-    lines.extend_from_slice(&body);
+    for line in tail {
+        lines.push(line.to_string());
+    }
     lines.join("\n")
 }
 
@@ -1759,8 +1789,69 @@ fn generate_inner(sema: SemaResult, body_only: bool) -> Result<CompiledProgram, 
         g.emit("D=A");
         g.emit("@SP");
         g.emit("M=D");
-        // Marker: output module inserts data-init code here for asm/hack formats
-        g.emit("// __DATA_INIT_HERE__");
+
+        // Emit initialization for string literals (ensures consecutive RAM allocation)
+        for (sym_prefix, chars) in &sema.string_literals {
+            let n = chars.len();
+            for (i, &ch) in chars.iter().enumerate() {
+                let sym = if i == 0 { sym_prefix.clone() } else { format!("{}_{}", sym_prefix, i) };
+                emit_init_value(&mut g, ch, &sym);
+            }
+            // Null terminator (always zero — just allocate the slot)
+            g.emit(&format!("@{}_{}", sym_prefix, n));
+        }
+
+        // Emit allocation for multi-word globals (arrays, structs) — ensures consecutive RAM
+        for (name, ty, _init_val) in &sema.globals {
+            let sym = format!("__g_{}", name);
+            let size = type_size(ty, &sema.struct_defs).max(1);
+            if size > 1 {
+                for i in 0..size {
+                    let elem_sym = if i == 0 { sym.clone() } else { format!("{}_{}", sym, i) };
+                    g.emit(&format!("@{}", elem_sym));
+                }
+            }
+        }
+
+        // Emit initialization for non-zero scalar globals
+        for (name, ty, init_val) in &sema.globals {
+            let sym = format!("__g_{}", name);
+            let size = type_size(ty, &sema.struct_defs).max(1);
+            if size == 1 {
+                if let Some(val) = init_val {
+                    if *val != 0 {
+                        emit_init_value(&mut g, *val as i16, &sym);
+                    }
+                }
+            }
+        }
+
+        // Font table init (before calling main, after globals)
+        // Detect reachable functions that use the font table.
+        const FONT_USERS: &[&str] = &[
+            "draw_char", "draw_string", "print_at",
+            "putchar_screen", "puts_screen",
+        ];
+        let needs_font = sema.funcs.iter()
+            .filter(|f| reachable.contains(&f.name))
+            .any(|f| {
+                let calls = collect_calls_from_stmts(&f.body);
+                FONT_USERS.iter().any(|name| calls.contains(*name))
+            });
+        if needs_font {
+            g.emit("// Pre-load font table");
+            for ch_idx in 0..96usize {
+                for row in 0..11usize {
+                    let byte = FONT_8X11[ch_idx][row];
+                    if byte == 0 { continue; }
+                    let addr = FONT_BASE + ch_idx * 11 + row;
+                    g.emit(&format!("@{}", byte));
+                    g.emit("D=A");
+                    g.emit(&format!("@{}", addr));
+                    g.emit("M=D");
+                }
+            }
+        }
 
         // Call main (Jack VM calling convention)
         let id = g.label();
@@ -1810,52 +1901,5 @@ fn generate_inner(sema: SemaResult, body_only: bool) -> Result<CompiledProgram, 
 
     let asm = g.out.join("\n") + "\n";
 
-    // ── Phase 4: Collect DataInit entries ────────────────────────────────────
-    let mut data: Vec<DataInit> = Vec::new();
-
-    // Non-zero global variable initialisations
-    for (_name, addr, _ty, init_val) in &sema.globals {
-        if let Some(val) = init_val {
-            if *val != 0 {
-                data.push(DataInit { address: *addr as u16, value: *val as i16 });
-            }
-        }
-    }
-
-    // String literal content (null terminators are zero so we skip them)
-    for (addr, chars) in &sema.string_literals {
-        for (i, &ch) in chars.iter().enumerate() {
-            if ch != 0 {
-                data.push(DataInit { address: (*addr + i) as u16, value: ch });
-            }
-        }
-    }
-
-    // Font table — needed when any reachable C function calls a font-rendering function.
-    // This includes direct calls (draw_char, draw_string, print_at) and screen-console
-    // calls (putchar_screen, puts_screen) which transitively invoke __draw_char.
-    const FONT_USERS: &[&str] = &[
-        "draw_char", "draw_string", "print_at",
-        "putchar_screen", "puts_screen",
-    ];
-    let needs_font = sema.funcs.iter()
-        .filter(|f| reachable.contains(&f.name))
-        .any(|f| {
-            let calls = collect_calls_from_stmts(&f.body);
-            FONT_USERS.iter().any(|name| calls.contains(*name))
-        });
-    if needs_font {
-        for ch_idx in 0..96usize {
-            for row in 0..11usize {
-                let byte = FONT_8X11[ch_idx][row];
-                // Jack OS font already uses bit-0=leftmost, matching Hack screen format.
-                // No reversal needed.
-                if byte == 0 { continue; }
-                let addr = (FONT_BASE + ch_idx * 11 + row) as u16;
-                data.push(DataInit { address: addr, value: byte as i16 });
-            }
-        }
-    }
-
-    Ok(CompiledProgram { asm, data, next_var_addr: sema.next_var_addr as u16 })
+    Ok(CompiledProgram { asm, data: Vec::new() })
 }
