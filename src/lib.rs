@@ -118,66 +118,16 @@ pub fn compile_to_object(source: &str, base_dir: Option<&std::path::Path>) -> Re
 
     let compiled = codegen::generate_body_only(sema_result)?;
 
-    let mut out = String::new();
-    // Directive: which symbols this object file provides
-    out.push_str(".provides");
-    for p in &provides {
-        out.push(' ');
-        out.push_str(p);
-    }
-    out.push('\n');
-
-    // Emit .data directives for all globals and string literals (in allocation order).
-    // hack_ld uses these to generate bootstrap init code with correct consecutive allocation.
-
-    // 1. String literal chars (symbol prefix, each char, then null terminator)
-    for (sym_prefix, chars) in &string_literals {
-        let n = chars.len();
-        for (i, &ch) in chars.iter().enumerate() {
-            let sym = if i == 0 { sym_prefix.clone() } else { format!("{}_{}", sym_prefix, i) };
-            out.push_str(&format!(".data {} {}\n", sym, ch));
-        }
-        out.push_str(&format!(".data {}_{} 0\n", sym_prefix, n));
-    }
-
-    // 2. Multi-word globals (all elements, zero-initialized)
-    for (name, ty, _init_val) in &globals_info {
-        let sym = format!("__g_{}", name);
-        let size = sema::type_size(ty, &struct_defs).max(1);
-        if size > 1 {
-            for i in 0..size {
-                let elem_sym = if i == 0 { sym.clone() } else { format!("{}_{}", sym, i) };
-                out.push_str(&format!(".data {} 0\n", elem_sym));
-            }
-        }
-    }
-
-    // 3. Scalar globals (all, to establish deterministic allocation order)
-    for (name, ty, init_val) in &globals_info {
-        let sym = format!("__g_{}", name);
-        let size = sema::type_size(ty, &struct_defs).max(1);
-        if size == 1 {
-            let val = init_val.unwrap_or(0) as i16;
-            out.push_str(&format!(".data {} {}\n", sym, val));
-        }
-    }
-
-    // Font table data (absolute addresses)
-    for d in &compiled.data {
-        out.push_str(&format!(".data @{} {}\n", d.address, d.value));
-    }
-
-    out.push_str(&compiled.asm);
+    let out = build_object_text(&provides, &string_literals, &globals_info, &struct_defs, &compiled);
     Ok(out)
 }
 
 /// Compile multiple C source files and link them into a single program.
 ///
-/// Each `(source, base_dir)` pair is preprocessed and parsed independently.
-/// The resulting `Program` ASTs are merged — struct definitions are
-/// deduplicated by name, and duplicate forward declarations (e.g., from
-/// headers included in several files) are collapsed into one.  The merged
-/// program then goes through the normal sema → codegen → linker pipeline.
+/// Each file is compiled independently to a body-only `.s` object, then
+/// all objects are linked together with a generated bootstrap.  This avoids
+/// the previous AST-merge approach and works correctly across translation
+/// units that share globals (both reference the same `@__g_name` symbol).
 pub fn compile_files(files: &[(&str, Option<&std::path::Path>)]) -> Result<CompiledProgram, Error> {
     compile_files_with_options(files, &[])
 }
@@ -187,52 +137,23 @@ pub fn compile_files_with_options(
     files: &[(&str, Option<&std::path::Path>)],
     include_dirs: &[PathBuf],
 ) -> Result<CompiledProgram, Error> {
-    let mut merged = parser::Program {
-        struct_defs: vec![],
-        globals: vec![],
-        funcs: vec![],
-    };
-
-    let mut seen_structs: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut seen_globals: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut defined_funcs: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    let mut parsed_programs: Vec<parser::Program> = Vec::new();
+    let mut objects: Vec<String> = Vec::new();
     for (source, base_dir) in files {
         let expanded = preprocessor::preprocess_with_dirs(source, *base_dir, include_dirs)?;
         let tokens = lexer::lex(&expanded)?;
         let program = parser::parse(tokens)?;
-        for f in &program.funcs {
-            if !f.is_decl {
-                defined_funcs.insert(f.name.clone());
-            }
-        }
-        parsed_programs.push(program);
+        let provides: Vec<String> = program.funcs.iter()
+            .filter(|f| !f.is_decl)
+            .map(|f| f.name.clone())
+            .collect();
+        let sema_result = sema::analyze(program)?;
+        let string_literals = sema_result.string_literals.clone();
+        let globals_info = sema_result.globals.clone();
+        let struct_defs = sema_result.struct_defs.clone();
+        let compiled = codegen::generate_body_only(sema_result)?;
+        objects.push(build_object_text(&provides, &string_literals, &globals_info, &struct_defs, &compiled));
     }
-
-    for program in parsed_programs {
-        for sd in program.struct_defs {
-            if seen_structs.insert(sd.name.clone()) {
-                merged.struct_defs.push(sd);
-            }
-        }
-        for g in program.globals {
-            if seen_globals.insert(g.1.clone()) {
-                merged.globals.push(g);
-            }
-        }
-        for f in program.funcs {
-            if f.is_decl && defined_funcs.contains(&f.name) {
-                continue;
-            }
-            merged.funcs.push(f);
-        }
-    }
-
-    let sema_result = sema::analyze(merged)?;
-    let mut compiled = codegen::generate(sema_result)?;
-    compiled.asm = linker::link(&compiled.asm, &linker::default_lib_dirs());
-    Ok(compiled)
+    link_objects(&objects, &linker::default_lib_dirs())
 }
 
 /// Like [`compile_files_with_options`] but accepts full [`CompileOptions`].
@@ -240,50 +161,137 @@ pub fn compile_files_with_full_options(
     files: &[(&str, Option<&std::path::Path>)],
     opts: &CompileOptions,
 ) -> Result<CompiledProgram, Error> {
-    let mut merged = parser::Program {
-        struct_defs: vec![],
-        globals: vec![],
-        funcs: vec![],
-    };
-
-    let mut seen_structs: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut seen_globals: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut defined_funcs: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    let mut parsed_programs: Vec<parser::Program> = Vec::new();
+    let mut objects: Vec<String> = Vec::new();
     for (source, base_dir) in files {
         let expanded = preprocessor::preprocess_with_predefined(source, *base_dir, &opts.include_dirs, &opts.defines)?;
         let tokens = lexer::lex(&expanded)?;
         let program = parser::parse(tokens)?;
-        for f in &program.funcs {
-            if !f.is_decl {
-                defined_funcs.insert(f.name.clone());
+        let provides: Vec<String> = program.funcs.iter()
+            .filter(|f| !f.is_decl)
+            .map(|f| f.name.clone())
+            .collect();
+        let sema_result = sema::analyze(program)?;
+        let string_literals = sema_result.string_literals.clone();
+        let globals_info = sema_result.globals.clone();
+        let struct_defs = sema_result.struct_defs.clone();
+        let compiled = codegen::generate_body_only(sema_result)?;
+        objects.push(build_object_text(&provides, &string_literals, &globals_info, &struct_defs, &compiled));
+    }
+    link_objects(&objects, &opts.lib_dirs)
+}
+
+/// Build an object `.s` text from the parts of a single compiled translation unit.
+/// Used by both `compile_to_object` and the multi-file `compile_files_*` paths.
+fn build_object_text(
+    provides: &[String],
+    string_literals: &[(String, Vec<i16>)],
+    globals_info: &[(String, crate::parser::Type, Option<i32>)],
+    struct_defs: &std::collections::HashMap<String, Vec<(String, crate::parser::Type)>>,
+    compiled: &codegen::CompiledProgram,
+) -> String {
+    let mut out = String::new();
+    out.push_str(".provides");
+    for p in provides {
+        out.push(' ');
+        out.push_str(p);
+    }
+    out.push('\n');
+    // String literal chars
+    for (sym_prefix, chars) in string_literals {
+        let n = chars.len();
+        for (i, &ch) in chars.iter().enumerate() {
+            let sym = if i == 0 { sym_prefix.clone() } else { format!("{}_{}", sym_prefix, i) };
+            out.push_str(&format!(".data {} {}\n", sym, ch));
+        }
+        out.push_str(&format!(".data {}_{} 0\n", sym_prefix, n));
+    }
+    // Multi-word globals
+    for (name, ty, _) in globals_info {
+        let sym = format!("__g_{}", name);
+        let size = sema::type_size(ty, struct_defs).max(1);
+        if size > 1 {
+            for i in 0..size {
+                let elem_sym = if i == 0 { sym.clone() } else { format!("{}_{}", sym, i) };
+                out.push_str(&format!(".data {} 0\n", elem_sym));
             }
         }
-        parsed_programs.push(program);
+    }
+    // Scalar globals
+    for (name, ty, init_val) in globals_info {
+        let sym = format!("__g_{}", name);
+        let size = sema::type_size(ty, struct_defs).max(1);
+        if size == 1 {
+            let val = init_val.unwrap_or(0) as i16;
+            out.push_str(&format!(".data {} {}\n", sym, val));
+        }
+    }
+    out.push_str(&compiled.asm);
+    out
+}
+
+/// Link pre-compiled object `.s` texts into a `CompiledProgram`.
+/// Parses `.data` directives, generates bootstrap init code (including font
+/// table if needed), runs the runtime symbol-scan linker, and returns the
+/// final assembled program.
+fn link_objects(texts: &[String], lib_dirs: &[PathBuf]) -> Result<CompiledProgram, Error> {
+    // 1. Parse .data entries from all objects (file order → allocation order)
+    let mut data_entries: Vec<(String, i16)> = Vec::new();
+    for text in texts {
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix(".data ") {
+                let mut parts = rest.split_whitespace();
+                if let (Some(name), Some(val_str)) = (parts.next(), parts.next()) {
+                    if name.starts_with('@') { continue; }
+                    if let Ok(v) = val_str.parse::<i16>() {
+                        data_entries.push((name.to_string(), v));
+                    }
+                }
+            }
+        }
     }
 
-    for program in parsed_programs {
-        for sd in program.struct_defs {
-            if seen_structs.insert(sd.name.clone()) {
-                merged.struct_defs.push(sd);
-            }
-        }
-        for g in program.globals {
-            if seen_globals.insert(g.1.clone()) {
-                merged.globals.push(g);
-            }
-        }
-        for f in program.funcs {
-            if f.is_decl && defined_funcs.contains(&f.name) {
-                continue;
-            }
-            merged.funcs.push(f);
-        }
+    // 2. Combine all body texts
+    let mut combined_bodies = String::new();
+    for text in texts {
+        combined_bodies.push_str(text);
+        combined_bodies.push('\n');
     }
 
-    let sema_result = sema::analyze(merged)?;
-    let mut compiled = codegen::generate(sema_result)?;
-    compiled.asm = linker::link(&compiled.asm, &opts.lib_dirs);
-    Ok(compiled)
+    // 3. Run runtime linker on bodies (pulls in needed library modules)
+    let linked_bodies = linker::link(&combined_bodies, lib_dirs);
+
+    // 4. Detect font usage: __draw_char linked in iff its label appears
+    let needs_font = linked_bodies.contains("(__draw_char)");
+
+    // 5. Build init code: data init + (font init if needed)
+    let mut init_code = gen_data_init_code(&data_entries);
+    if needs_font {
+        init_code.push_str(&codegen::gen_font_init_asm());
+    }
+
+    // 6. Build bootstrap and prepend to linked bodies
+    let bootstrap = codegen::gen_bootstrap(&init_code);
+    let asm = format!("{}\n{}", bootstrap, linked_bodies);
+
+    Ok(CompiledProgram { asm, data: Vec::new() })
+}
+
+/// Convert symbolic name-value pairs into Hack assembly init instructions.
+fn gen_data_init_code(entries: &[(String, i16)]) -> String {
+    let mut out = String::new();
+    for (name, val) in entries {
+        let v = *val;
+        if v == 0 {
+            out.push_str(&format!("@{}\n", name));
+        } else if v == 1 {
+            out.push_str(&format!("D=1\n@{}\nM=D\n", name));
+        } else if v == -1 {
+            out.push_str(&format!("D=-1\n@{}\nM=D\n", name));
+        } else if v > 0 {
+            out.push_str(&format!("@{}\nD=A\n@{}\nM=D\n", v, name));
+        } else {
+            out.push_str(&format!("@{}\nD=-A\n@{}\nM=D\n", -(v as i32), name));
+        }
+    }
+    out
 }

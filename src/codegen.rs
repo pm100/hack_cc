@@ -1716,6 +1716,22 @@ pub fn generate_body_only(sema: SemaResult) -> Result<CompiledProgram, CodegenEr
 }
 
 /// Return the Hack assembly bootstrap that initialises the stack pointer,
+/// Generate Hack assembly instructions that initialize the 8×11 font table in RAM.
+/// Returns only the instructions (no labels, no SP init, no call to main).
+/// Suitable for inclusion in a bootstrap before calling main.
+pub fn gen_font_init_asm() -> String {
+    let mut out = String::from("// Pre-load font table\n");
+    for ch_idx in 0..96usize {
+        for row in 0..11usize {
+            let byte = FONT_8X11[ch_idx][row];
+            if byte == 0 { continue; }
+            let addr = FONT_BASE + ch_idx * 11 + row;
+            out.push_str(&format!("@{}\nD=A\n@{}\nM=D\n", byte, addr));
+        }
+    }
+    out
+}
+
 /// calls `main`, and halts.  `init_code` is inserted between the SP
 /// initialization and the call to `main` — use it to initialize global
 /// variables and string literals.
