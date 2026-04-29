@@ -32,6 +32,12 @@ const SKIP_SUBDIRS: &[&str] = &[
     "libraries",    // multi-file programs — single-file compiler only
 ];
 
+/// Specific file names (basename only) that are always skipped.
+/// These require platform-specific external assembly linkage that Hack cannot provide.
+const SKIP_FILES: &[&str] = &[
+    "stack_alignment.c",   // requires stack_alignment_check_<platform>.s
+];
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -186,6 +192,14 @@ fn external_c_test_suite() {
             if in_skip_dir(c_file) {
                 ch.skip_dir += 1;
                 continue;
+            }
+
+            // Skip specific files that require external linkage not available on Hack.
+            if let Some(name) = c_file.file_name().and_then(|n| n.to_str()) {
+                if SKIP_FILES.contains(&name) {
+                    ch.skip_dir += 1;
+                    continue;
+                }
             }
 
             // Skip tests with integer literals that exceed 16-bit range.

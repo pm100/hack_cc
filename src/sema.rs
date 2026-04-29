@@ -125,13 +125,12 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
 
     // Build function signature table (include declarations so calls type-check)
     let mut func_sigs: HashMap<String, (Type, usize)> = HashMap::new();
-    // Also track which names have actual definitions (not just forward decls)
+    // Both definitions and forward declarations are valid call targets.
+    // Declarations come from #include'd headers; the linker/codegen provides the implementation.
     let mut defined_funcs: HashSet<String> = HashSet::new();
     for f in &prog.funcs {
         func_sigs.insert(f.name.clone(), (f.ret_ty.clone(), f.params.len()));
-        if !f.is_decl {
-            defined_funcs.insert(f.name.clone());
-        }
+        defined_funcs.insert(f.name.clone());
     }
 
     // Analyze each function (skip forward declarations — they have no body)
@@ -142,27 +141,9 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
         funcs_out.push(af);
     }
 
-    // Verify that all calls target defined functions, known linker-provided externals,
-    // or inline codegen builtins.
-    // Any function in this list is either handled inline by codegen or resolvable by the linker.
-    const KNOWN_EXTERNALS: &[&str] = &[
-        // Inline codegen builtins (no library needed)
-        "abs", "min", "max", "read_key",
-        // I/O builtins — port output
-        "putchar", "puts",
-        // I/O builtins — screen output (selected via -D HACK_OUTPUT_SCREEN in hack.h)
-        "putchar_screen", "puts_screen",
-        // String / I/O
-        "strlen", "getchar",
-        "draw_pixel", "clear_pixel", "fill_screen", "clear_screen",
-        "draw_char", "draw_string", "print_at",
-        // Runtime library (resolved by linker from src/runtime/)
-        "strcpy", "strcmp", "strcat", "itoa",
-        "draw_line", "draw_rect", "fill_rect", "clear_rect",
-        "malloc", "free", "sys_wait",
-    ];
+    // Verify that all calls target declared or defined functions.
     for af in &funcs_out {
-        check_calls_defined_ext(&af.body, &defined_funcs, KNOWN_EXTERNALS, user_externals)?;
+        check_calls_defined_ext(&af.body, &defined_funcs, &[], user_externals)?;
     }
 
     Ok(SemaResult { globals: globals_out, funcs: funcs_out, func_sigs, string_literals, string_map, struct_defs, next_var_addr: next_global_addr })
@@ -178,15 +159,6 @@ fn eval_const(expr: &Expr) -> Result<i32, SemaError> {
     }
 }
 
-/// Verify that all Call expressions in `stmts` resolve to a defined function or known builtin.
-/// Forward-declared-only functions cannot be linked on the Hack target (no linker).
-fn check_calls_defined(stmts: &[Stmt], defined: &HashSet<String>, builtins: &[&str]) -> Result<(), SemaError> {
-    for stmt in stmts {
-        check_calls_stmt(stmt, defined, builtins)?;
-    }
-    Ok(())
-}
-
 fn check_calls_defined_ext(
     stmts: &[Stmt],
     defined: &HashSet<String>,
@@ -195,79 +167,6 @@ fn check_calls_defined_ext(
 ) -> Result<(), SemaError> {
     for stmt in stmts {
         check_calls_stmt_ext(stmt, defined, builtins, externals)?;
-    }
-    Ok(())
-}
-
-fn check_calls_stmt(stmt: &Stmt, defined: &HashSet<String>, builtins: &[&str]) -> Result<(), SemaError> {
-    match stmt {
-        Stmt::Expr(e) => check_calls_expr(e, defined, builtins)?,
-        Stmt::Return(Some(e)) => check_calls_expr(e, defined, builtins)?,
-        Stmt::Decl(_, _, Some(e)) => check_calls_expr(e, defined, builtins)?,
-        Stmt::If(c, t, el) => {
-            check_calls_expr(c, defined, builtins)?;
-            check_calls_stmt(t, defined, builtins)?;
-            if let Some(e) = el { check_calls_stmt(e, defined, builtins)?; }
-        }
-        Stmt::While(c, b) => {
-            check_calls_expr(c, defined, builtins)?;
-            check_calls_stmt(b, defined, builtins)?;
-        }
-        Stmt::DoWhile(b, c) => {
-            check_calls_stmt(b, defined, builtins)?;
-            check_calls_expr(c, defined, builtins)?;
-        }
-        Stmt::For { init, cond, incr, body } => {
-            if let Some(s) = init { check_calls_stmt(s, defined, builtins)?; }
-            if let Some(e) = cond { check_calls_expr(e, defined, builtins)?; }
-            if let Some(e) = incr { check_calls_expr(e, defined, builtins)?; }
-            check_calls_stmt(body, defined, builtins)?;
-        }
-        Stmt::Block(stmts) => check_calls_defined(stmts, defined, builtins)?,
-        Stmt::Switch { expr, arms } => {
-            check_calls_expr(expr, defined, builtins)?;
-            for arm in arms {
-                for s in &arm.stmts { check_calls_stmt(s, defined, builtins)?; }
-            }
-        }
-        Stmt::Break | Stmt::Continue => {}
-        _ => {}
-    }
-    Ok(())
-}
-
-fn check_calls_expr(expr: &Expr, defined: &HashSet<String>, builtins: &[&str]) -> Result<(), SemaError> {
-    match expr {
-        Expr::Call(name, args) => {
-            if !defined.contains(name) && !builtins.contains(&name.as_str()) {
-                return Err(SemaError::new(format!(
-                    "call to '{}': function has no definition (external functions are not supported)",
-                    name
-                )));
-            }
-            for a in args { check_calls_expr(a, defined, builtins)?; }
-        }
-        Expr::BinOp(_, l, r) => {
-            check_calls_expr(l, defined, builtins)?;
-            check_calls_expr(r, defined, builtins)?;
-        }
-        Expr::UnOp(_, e) => check_calls_expr(e, defined, builtins)?,
-        Expr::Index(a, b) => {
-            check_calls_expr(a, defined, builtins)?;
-            check_calls_expr(b, defined, builtins)?;
-        }
-        Expr::Member(base, _) => check_calls_expr(base, defined, builtins)?,
-        Expr::Ternary(c, t, e) => {
-            check_calls_expr(c, defined, builtins)?;
-            check_calls_expr(t, defined, builtins)?;
-            check_calls_expr(e, defined, builtins)?;
-        }
-        Expr::Cast(_, e) => check_calls_expr(e, defined, builtins)?,
-        Expr::PostInc(e) | Expr::PostDec(e) => check_calls_expr(e, defined, builtins)?,
-        Expr::InitList(items) => {
-            for item in items { check_calls_expr(item, defined, builtins)?; }
-        }
-        Expr::Num(_) | Expr::Ident(_) | Expr::StringLit(_) | Expr::Sizeof(_) => {}
     }
     Ok(())
 }
@@ -314,7 +213,7 @@ fn check_calls_expr_ext(expr: &Expr, defined: &HashSet<String>, builtins: &[&str
         Expr::Call(name, args) => {
             if !defined.contains(name) && !builtins.contains(&name.as_str()) && !externals.contains(&name.as_str()) {
                 return Err(SemaError::new(format!(
-                    "call to '{}': function has no definition (external functions are not supported)",
+                    "call to undeclared function '{}'",
                     name
                 )));
             }

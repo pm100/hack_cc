@@ -93,21 +93,14 @@ pub fn compile_to_object(source: &str, base_dir: Option<&std::path::Path>) -> Re
     let tokens = lexer::lex(&expanded)?;
     let program = parser::parse(tokens)?;
 
-    // Collect forward-declared function names (declared in headers but defined elsewhere).
-    // These are valid call targets in separate compilation — the linker provides them.
-    let decl_names: Vec<String> = program.funcs.iter()
-        .filter(|f| f.is_decl)
-        .map(|f| f.name.clone())
-        .collect();
-    let decl_refs: Vec<&str> = decl_names.iter().map(|s| s.as_str()).collect();
-
     // Collect function names before sema (we'll use them as PROVIDES list).
     let provides: Vec<String> = program.funcs.iter()
         .filter(|f| !f.is_decl)
         .map(|f| f.name.clone())
         .collect();
 
-    let sema_result = sema::analyze_for_object_file(program, &decl_refs)?;
+    // Forward declarations (from headers) are now handled inside sema::analyze.
+    let sema_result = sema::analyze(program)?;
     // Body-only: no bootstrap, no entry-point call to main.
     let compiled = codegen::generate_body_only(sema_result)?;
     // Note: runtime modules are NOT linked here; hack_ld handles that.

@@ -590,7 +590,24 @@ mod tests {
     /// Compile and run, returning (return_value, output_string, full_ram).
     fn compile_and_run_ext(c_src: &str, max_cycles: u64) -> (i16, String, Vec<i16>) {
         use hack_cc::output::{emit, OutputFormat};
-        let prog = hack_cc::compile(c_src)
+        use hack_cc::{CompileOptions, compile_with_full_options};
+        use std::path::PathBuf;
+
+        // Prepend #include <hack.h> if the test source doesn't already have it,
+        // so test programs can call puts/putchar/strlen/etc. without boilerplate.
+        let src_with_header;
+        let src: &str = if c_src.contains("#include") {
+            c_src
+        } else {
+            src_with_header = format!("#include <hack.h>\n{}", c_src);
+            &src_with_header
+        };
+
+        let opts = CompileOptions {
+            include_dirs: vec![PathBuf::from("include")],
+            ..Default::default()
+        };
+        let prog = compile_with_full_options(src, None, &opts)
             .unwrap_or_else(|e| panic!("compile error: {}", e));
         // Use emit() so the __DATA_INIT_HERE__ marker is replaced with data-init asm,
         // ensuring font table, string literals, and global initializers are present in RAM.
@@ -1046,11 +1063,32 @@ mod tests {
     /// "Hello, World!" → row=44 → no pixels were rendered (blank screen).
     #[test]
     fn test_puts_screen_no_collision() {
-        let (ret, _, ram) = compile_and_run_ext(
-            r#"int main() { puts_screen("Hello, World!"); return 0; }"#,
-            8_000_000,
-        );
-        assert_eq!(ret, 0);
+        use hack_cc::{CompileOptions, compile_with_full_options};
+        use hack_cc::output::{emit, OutputFormat};
+        use std::path::PathBuf;
+        let mut opts = CompileOptions {
+            include_dirs: vec![PathBuf::from("include")],
+            ..Default::default()
+        };
+        opts.defines.insert("HACK_OUTPUT_SCREEN".to_string(), "1".to_string());
+        let prog = compile_with_full_options(
+            r#"#include <hack.h>
+int main() { puts_screen("Hello, World!"); return 0; }"#,
+            None, &opts,
+        ).unwrap_or_else(|e| panic!("compile error: {}", e));
+        let full_asm = emit(&prog, OutputFormat::Asm)
+            .unwrap_or_else(|e| panic!("emit error: {}", e))
+            .main;
+        let rom = assemble_with_var_base(&full_asm, prog.next_var_addr as i16)
+            .unwrap_or_else(|e| panic!("assemble error: {}", e));
+        let mut cpu = Cpu::new();
+        let mut cycles = 0u64;
+        loop {
+            if cycles >= 8_000_000 || !cpu.step(&rom, false) { break; }
+            cycles += 1;
+        }
+        let ram = cpu.ram;
+        assert_eq!(ram[256], 0);
         // At least some pixels must be set: "Hello" starts at col=0, row=0.
         // 'H' row0=0x33=51 → bits 0,1,4,5 set → pixels (0,0) and (1,0).
         assert!(pixel_set(&ram, 0, 0), "pixel (0,0) should be set for 'H' row0 (no var collision)");
@@ -1297,7 +1335,12 @@ int main() {
 
     #[test]
     fn test_puts_emitted_when_used() {
-        let prog = hack_cc::compile(r#"int main() { puts("hi"); return 0; }"#).unwrap();
+        use hack_cc::{CompileOptions, compile_with_full_options};
+        use std::path::PathBuf;
+        let opts = CompileOptions { include_dirs: vec![PathBuf::from("include")], ..Default::default() };
+        let prog = compile_with_full_options(
+            r#"#include <hack.h>
+int main() { puts("hi"); return 0; }"#, None, &opts).unwrap();
         assert!(prog.asm.contains("(__puts)"), "puts helper must be emitted when puts() is called");
     }
 
