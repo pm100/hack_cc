@@ -2098,8 +2098,13 @@ impl Gen {
                     self.gen_stmt(s, vars, func_name)?;
                 }
             }
-            Stmt::Decl(_, name, init) => {
-                if let Some(init_expr) = init {
+            Stmt::Decl(_, name, init, sc) => {
+                // Static and extern locals: initialization happens at startup (via global data
+                // init), not at each function call. Skip runtime init code for them.
+                use crate::parser::StorageClass;
+                if *sc == StorageClass::Static || *sc == StorageClass::Extern {
+                    // nothing to do here
+                } else if let Some(init_expr) = init {
                     let info = vars.get(name).ok_or_else(|| {
                         CodegenError::new(format!("undefined local '{}'", name))
                     })?.clone();
@@ -2527,7 +2532,7 @@ fn collect_calls_stmt(s: &Stmt, calls: &mut HashSet<String>) {
     match s {
         Stmt::Expr(e)           => collect_calls_expr(e, calls),
         Stmt::Return(Some(e))   => collect_calls_expr(e, calls),
-        Stmt::Decl(_, _, Some(e)) => collect_calls_expr(e, calls),
+        Stmt::Decl(_, _, Some(e), _) => collect_calls_expr(e, calls),
         Stmt::Block(ss)         => ss.iter().for_each(|s| collect_calls_stmt(s, calls)),
         Stmt::If(c, t, e) => {
             collect_calls_expr(c, calls);
@@ -2738,8 +2743,7 @@ fn generate_inner(sema: SemaResult, body_only: bool) -> Result<CompiledProgram, 
         }
 
         // Emit allocation for multi-word globals (arrays, structs) — ensures consecutive RAM
-        for (name, ty, _init_val) in &sema.globals {
-            let sym = format!("__g_{}", name);
+        for (sym, ty, _init_val) in &sema.globals {
             let size = type_size(ty, &sema.struct_defs).max(1);
             if size > 1 {
                 for i in 0..size {
@@ -2750,28 +2754,26 @@ fn generate_inner(sema: SemaResult, body_only: bool) -> Result<CompiledProgram, 
         }
 
         // Emit initialization for non-zero scalar globals
-        for (name, ty, init_val) in &sema.globals {
-            let sym = format!("__g_{}", name);
+        for (sym, ty, init_val) in &sema.globals {
             let size = type_size(ty, &sema.struct_defs).max(1);
             if size == 1 {
                 if let Some(val) = init_val {
                     if *val != 0 {
-                        emit_init_value(&mut g, *val as i16, &sym);
+                        emit_init_value(&mut g, *val as i16, sym);
                     }
                 }
             }
         }
 
         // Initialize non-zero Long globals (both hi and lo words)
-        for (name, ty, init_val) in &sema.globals {
+        for (sym, ty, init_val) in &sema.globals {
             if matches!(ty, Type::Long) {
                 if let Some(val) = init_val {
                     let val = *val as i32;
                     let hi = ((val as u32 >> 16) & 0xFFFF) as i16;
                     let lo = (val as u16) as i16;
-                    let sym = format!("__g_{}", name);
                     if hi != 0 {
-                        emit_init_value(&mut g, hi, &sym);
+                        emit_init_value(&mut g, hi, sym);
                     }
                     if lo != 0 {
                         emit_init_value(&mut g, lo, &format!("{}_1", sym));

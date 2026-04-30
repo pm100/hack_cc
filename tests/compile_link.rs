@@ -1149,3 +1149,184 @@ fn test_compile_files_api_with_stdlib() {
     assert_eq!(code, 0);
     assert_eq!(out, "Z");
 }
+
+// ── Static locals and file-scope statics ─────────────────────────────────────
+
+#[test]
+fn test_static_local_persists() {
+    // Static local should retain value across calls.
+    let src = r#"
+int foo(void) {
+    static int a = 3;
+    a = a * 2;
+    return a;
+}
+int main(void) {
+    int x = foo(); // 6
+    int y = foo(); // 12
+    if (x == 6 && y == 12) return 1;
+    return 0;
+}
+"#;
+    let asm = compile_whole(src, "sl_persist");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 1);
+}
+
+#[test]
+fn test_static_locals_distinct_funcs() {
+    // Static locals with same name in different functions are distinct.
+    let src = r#"
+int foo(void) {
+    static int a = 3;
+    a = a * 2;
+    return a;
+}
+int bar(void) {
+    static int a = 4;
+    a = a + 1;
+    return a;
+}
+int main(void) {
+    // foo: 6, bar: 5, foo: 12, bar: 6 => sum = 29
+    return foo() + bar() + foo() + bar();
+}
+"#;
+    let asm = compile_whole(src, "sl_distinct");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 29);
+}
+
+#[test]
+fn test_static_local_uninitialized() {
+    // Uninitialized static local is zero-initialized.
+    let src = r#"
+int foo(void) {
+    static int x;
+    x = x + 1;
+    return x;
+}
+int main(void) {
+    int ret = 0;
+    int i;
+    for (i = 0; i < 4; i = i + 1)
+        ret = foo();
+    return ret;
+}
+"#;
+    let asm = compile_whole(src, "sl_uninit");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 4);
+}
+
+#[test]
+fn test_static_file_scope() {
+    // Static file-scope variable has internal linkage but normal behavior.
+    let src = r#"
+static int x = 7;
+int main(void) {
+    x = x + 1;
+    return x;
+}
+"#;
+    let asm = compile_whole(src, "sf_scope");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 8);
+}
+
+#[test]
+fn test_static_local_multiple_scopes() {
+    // Two static locals with same name in different blocks of the same function are distinct.
+    let src = r#"
+int foo(void) {
+    static int i = 10;
+    i = i + 1;
+    {
+        static int i = 100;
+        i = i + 10;
+    }
+    return i;
+}
+int main(void) {
+    int r1 = foo(); // outer i: 11, inner i: 110
+    int r2 = foo(); // outer i: 12, inner i: 120
+    if (r1 == 11 && r2 == 12) return 5;
+    return 0;
+}
+"#;
+    let asm = compile_whole(src, "sl_scopes");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 5);
+}
+
+#[test]
+fn test_static_then_extern_file_scope() {
+    // `static int foo = 3; extern int foo;` - extern takes on same linkage.
+    let src = r#"
+static int foo = 3;
+extern int foo;
+int main(void) {
+    return foo;
+}
+"#;
+    let asm = compile_whole(src, "sf_extern");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 3);
+}
+
+#[test]
+fn test_tentative_definition() {
+    // Multiple tentative definitions merge into one zero-initialized global.
+    let src = r#"
+int foo;
+int foo;
+int main(void) {
+    int i;
+    for (i = 0; i < 5; i = i + 1)
+        foo = foo + 1;
+    return foo;
+}
+int foo;
+"#;
+    let asm = compile_whole(src, "tentative");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 5);
+}
+
+#[test]
+fn test_local_extern_refers_to_global() {
+    // `extern int a;` inside a block refers to the file-scope `a`.
+    let src = r#"
+int a = 5;
+int return_a(void) { return a; }
+int main(void) {
+    int a = 3;
+    {
+        extern int a;
+        if (a != 5) return 1;
+        a = 4;
+    }
+    return a + return_a();
+}
+"#;
+    let asm = compile_whole(src, "le_global");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 7);
+}
+
+#[test]
+fn test_type_before_storage_class() {
+    // `int static foo(void)` and `int static bar` should work.
+    let src = r#"
+int static foo(void) {
+    return 3;
+}
+int static bar = 4;
+int main(void) {
+    return foo() + bar;
+}
+"#;
+    let asm = compile_whole(src, "tbsc");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 7);
+}

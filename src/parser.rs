@@ -95,7 +95,7 @@ pub enum Stmt {
         body: Box<Stmt>,
     },
     Return(Option<Expr>),
-    Decl(Type, String, Option<Expr>),
+    Decl(Type, String, Option<Expr>, StorageClass),
     Expr(Expr),
     DoWhile(Box<Stmt>, Expr),
     Break,
@@ -117,6 +117,14 @@ pub enum SwitchLabel {
     Default,
 }
 
+/// Storage-class specifier on a declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorageClass {
+    None,
+    Static,
+    Extern,
+}
+
 #[derive(Debug, Clone)]
 pub struct FuncDef {
     pub ret_ty: Type,
@@ -126,12 +134,14 @@ pub struct FuncDef {
     /// True when this is a forward declaration (no body), false for a definition.
     pub is_decl: bool,
     pub is_variadic: bool,
+    /// True when declared with `static` (internal linkage).
+    pub is_static: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct Program {
     pub struct_defs: Vec<StructDef>,
-    pub globals: Vec<(Type, String, Option<Expr>)>,
+    pub globals: Vec<(Type, String, Option<Expr>, StorageClass)>,
     pub funcs: Vec<FuncDef>,
 }
 
@@ -143,11 +153,13 @@ struct Parser {
     struct_defs: Vec<StructDef>,
     typedef_map: HashMap<String, Type>,
     enum_map: HashMap<String, i32>,
+    /// Set by `parse_base_type` when it consumes a storage-class keyword.
+    cur_storage_class: StorageClass,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0, struct_defs: Vec::new(), typedef_map: HashMap::new(), enum_map: HashMap::new() }
+        Self { tokens, pos: 0, struct_defs: Vec::new(), typedef_map: HashMap::new(), enum_map: HashMap::new(), cur_storage_class: StorageClass::None }
     }
 
     fn cur(&self) -> &Token {
@@ -211,7 +223,17 @@ impl Parser {
     fn parse_base_type(&mut self) -> Result<Type, ParseError> {
         let (l, c) = self.cur_lc();
         match self.peek().clone() {
-            TokenKind::KwConst | TokenKind::KwExtern | TokenKind::KwStatic => {
+            TokenKind::KwConst => {
+                self.advance();
+                return self.parse_base_type();
+            }
+            TokenKind::KwExtern => {
+                self.cur_storage_class = StorageClass::Extern;
+                self.advance();
+                return self.parse_base_type();
+            }
+            TokenKind::KwStatic => {
+                self.cur_storage_class = StorageClass::Static;
                 self.advance();
                 return self.parse_base_type();
             }
@@ -275,6 +297,18 @@ impl Parser {
     /// Returns (type, name)
     fn parse_typed_decl(&mut self) -> Result<(Type, String), ParseError> {
         let mut ty = self.parse_type()?;
+        // Handle C's "type before storage class" syntax: `int static foo` or `int extern bar`.
+        match self.peek() {
+            TokenKind::KwStatic => {
+                self.cur_storage_class = StorageClass::Static;
+                self.advance();
+            }
+            TokenKind::KwExtern => {
+                self.cur_storage_class = StorageClass::Extern;
+                self.advance();
+            }
+            _ => {}
+        }
         let name = self.expect_ident()?;
         let mut dims = Vec::new();
         while self.eat(&TokenKind::LBracket) {
@@ -336,9 +370,12 @@ impl Parser {
             }
 
             let (ty, name) = self.parse_typed_decl()?;
+            let sc = std::mem::replace(&mut self.cur_storage_class, StorageClass::None);
 
             if *self.peek() == TokenKind::LParen {
-                funcs.push(self.parse_func_rest(ty, name)?);
+                let mut func = self.parse_func_rest(ty, name)?;
+                func.is_static = sc == StorageClass::Static;
+                funcs.push(func);
             } else {
                 let init = if self.eat(&TokenKind::Assign) {
                     Some(self.parse_assign_expr()?)
@@ -346,7 +383,7 @@ impl Parser {
                     None
                 };
                 self.expect(&TokenKind::Semicolon)?;
-                globals.push((ty, name, init));
+                globals.push((ty, name, init, sc));
             }
         }
         let struct_defs = std::mem::take(&mut self.struct_defs);
@@ -413,11 +450,11 @@ impl Parser {
         self.expect(&TokenKind::RParen)?;
         // Semicolon here = forward declaration (no body)
         if self.eat(&TokenKind::Semicolon) {
-            return Ok(FuncDef { ret_ty, name, params, body: vec![], is_decl: true, is_variadic });
+            return Ok(FuncDef { ret_ty, name, params, body: vec![], is_decl: true, is_variadic, is_static: false });
         }
         self.expect(&TokenKind::LBrace)?;
         let body = self.parse_stmts_until_rbrace()?;
-        Ok(FuncDef { ret_ty, name, params, body, is_decl: false, is_variadic })
+        Ok(FuncDef { ret_ty, name, params, body, is_decl: false, is_variadic, is_static: false })
     }
 
     fn parse_stmts_until_rbrace(&mut self) -> Result<Vec<Stmt>, ParseError> {
@@ -592,8 +629,10 @@ impl Parser {
             self.typedef_map.insert(name, ty);
             return Ok(Stmt::Block(vec![]));
         }
+        self.cur_storage_class = StorageClass::None;
         let (ty, name) = self.parse_typed_decl()?;
-        // Local function declaration: `int foo(int a);` inside a function body.
+        let sc = std::mem::replace(&mut self.cur_storage_class, StorageClass::None);
+        // Local function declaration: `int foo(int a);` or `int extern foo(void);`
         if *self.peek() == TokenKind::LParen {
             let _ = self.parse_func_rest(ty, name)?;
             return Ok(Stmt::Block(vec![]));
@@ -608,7 +647,7 @@ impl Parser {
             None
         };
         self.expect(&TokenKind::Semicolon)?;
-        Ok(Stmt::Decl(ty, name, init))
+        Ok(Stmt::Decl(ty, name, init, sc))
     }
 
     fn parse_init_list(&mut self) -> Result<Expr, ParseError> {

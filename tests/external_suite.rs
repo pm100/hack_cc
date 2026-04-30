@@ -22,7 +22,7 @@ const EXPECTED_JSON: &str =
     r"C:\work\forks\writing-a-c-compiler-tests\expected_results.json";
 
 /// Maximum chapter number to test (chapters 1..=MAX_CHAPTER).
-const MAX_CHAPTER: u32 = 9;
+const MAX_CHAPTER: u32 = 10;
 
 /// Maximum emulator cycles per test (generous — some tests use recursion).
 const MAX_CYCLES: &str = "5000000";

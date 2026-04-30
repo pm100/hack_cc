@@ -107,7 +107,7 @@ pub fn compile_to_object_with_options(
     let program = parser::parse(tokens)?;
 
     let provides: Vec<String> = program.funcs.iter()
-        .filter(|f| !f.is_decl)
+        .filter(|f| !f.is_decl && !f.is_static)
         .map(|f| f.name.clone())
         .collect();
 
@@ -134,7 +134,7 @@ pub fn compile_to_object(source: &str, base_dir: Option<&std::path::Path>) -> Re
     let program = parser::parse(tokens)?;
 
     let provides: Vec<String> = program.funcs.iter()
-        .filter(|f| !f.is_decl)
+        .filter(|f| !f.is_decl && !f.is_static)
         .map(|f| f.name.clone())
         .collect();
 
@@ -172,7 +172,7 @@ pub fn compile_files_with_options(
         let tokens = lexer::lex(&expanded)?;
         let program = parser::parse(tokens)?;
         let provides: Vec<String> = program.funcs.iter()
-            .filter(|f| !f.is_decl)
+            .filter(|f| !f.is_decl && !f.is_static)
             .map(|f| f.name.clone())
             .collect();
         let sema_result = sema::analyze(program)?;
@@ -196,7 +196,7 @@ pub fn compile_files_with_full_options(
         let tokens = lexer::lex(&expanded)?;
         let program = parser::parse(tokens)?;
         let provides: Vec<String> = program.funcs.iter()
-            .filter(|f| !f.is_decl)
+            .filter(|f| !f.is_decl && !f.is_static)
             .map(|f| f.name.clone())
             .collect();
         let sema_result = sema::analyze(program)?;
@@ -235,8 +235,7 @@ fn build_object_text(
         out.push_str(&format!(".data {}_{} 0\n", sym_prefix, n));
     }
     // Multi-word globals
-    for (name, ty, _) in globals_info {
-        let sym = format!("__g_{}", name);
+    for (sym, ty, _) in globals_info {
         let size = sema::type_size(ty, struct_defs).max(1);
         if size > 1 {
             for i in 0..size {
@@ -246,8 +245,7 @@ fn build_object_text(
         }
     }
     // Scalar globals
-    for (name, ty, init_val) in globals_info {
-        let sym = format!("__g_{}", name);
+    for (sym, ty, init_val) in globals_info {
         let size = sema::type_size(ty, struct_defs).max(1);
         if size == 1 {
             let val = init_val.unwrap_or(0) as i16;

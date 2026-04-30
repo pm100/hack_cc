@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
-use crate::parser::{Program, FuncDef, Stmt, Expr, BinOp, Type, SwitchArm, SwitchLabel};
+use crate::parser::{Program, FuncDef, Stmt, Expr, BinOp, Type, StorageClass};
 
 #[derive(Debug, Error, Clone)]
 #[error("semantic error: {0}")]
@@ -38,7 +38,7 @@ pub struct AnnotatedFunc {
 
 #[derive(Debug, Clone)]
 pub struct SemaResult {
-    pub globals: Vec<(String, Type, Option<i32>)>, // name, ty, init
+    pub globals: Vec<(String, Type, Option<i32>)>, // symbol (pre-formed, e.g. "__g_x" or "__sl_f_x"), ty, init
     pub funcs: Vec<AnnotatedFunc>,
     pub func_sigs: HashMap<String, (Type, usize)>, // name -> (ret_ty, n_params)
     /// Return type for each function name (for codegen to know call return type).
@@ -88,28 +88,46 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
         struct_defs.insert(sd.name.clone(), fields);
     }
 
-    // Assign global variable symbols (assembler resolves addresses)
+    // Assign global variable symbols.
+    // Multiple declarations of the same name (tentative definitions) are merged into one.
+    // Extern-only declarations (no definition anywhere) allocate no storage.
     let mut global_map: HashMap<String, VarInfo> = HashMap::new();
-    let mut globals_out = Vec::new();
+    let mut globals_out: Vec<(String, Type, Option<i32>)> = Vec::new();
 
-    for (ty, name, init_expr) in &prog.globals {
-        let sym = format!("__g_{}", name);
+    // Group by C name: track whether we have a real definition and the init value.
+    let mut seen_globals: HashMap<String, (Type, Option<i32>, bool)> = HashMap::new(); // name -> (ty, init, has_definition)
+    for (ty, name, init_expr, sc) in &prog.globals {
+        let is_extern_only = *sc == StorageClass::Extern;
         let init_val = match init_expr {
             Some(e) => Some(eval_const(e)?),
             None => None,
         };
-        global_map.insert(name.clone(), VarInfo {
-            ty: ty.clone(),
-            storage: VarStorage::Global(sym),
-        });
-        globals_out.push((name.clone(), ty.clone(), init_val));
+        let entry = seen_globals.entry(name.clone()).or_insert_with(|| (ty.clone(), None, false));
+        if !is_extern_only {
+            entry.2 = true; // marks as having a definition
+            if entry.1.is_none() {
+                entry.1 = init_val;
+            }
+        }
+    }
+
+    for (name, (ty, init_val, has_def)) in &seen_globals {
+        if !has_def {
+            // Pure extern declaration — add to global_map for type info, but emit no storage.
+            let sym = format!("__g_{}", name);
+            global_map.insert(name.clone(), VarInfo { ty: ty.clone(), storage: VarStorage::Global(sym) });
+            continue;
+        }
+        let sym = format!("__g_{}", name);
+        global_map.insert(name.clone(), VarInfo { ty: ty.clone(), storage: VarStorage::Global(sym.clone()) });
+        globals_out.push((sym, ty.clone(), *init_val));
     }
 
     // Collect string literals from all function bodies (and global inits)
     let mut string_map: HashMap<String, String> = HashMap::new();
     let mut string_literals: Vec<(String, Vec<i16>)> = Vec::new();
     let mut str_counter = 0usize;
-    for (_, _, init_expr) in &prog.globals {
+    for (_, _, init_expr, _) in &prog.globals {
         if let Some(e) = init_expr {
             collect_strings_expr(e, &mut string_map, &mut string_literals, &mut str_counter);
         }
@@ -135,7 +153,8 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
     let mut funcs_out = Vec::new();
     for f in prog.funcs {
         if f.is_decl { continue; }
-        let af = analyze_func(f, &global_map, &struct_defs)?;
+        let (af, static_locals) = analyze_func(f, &global_map, &struct_defs)?;
+        globals_out.extend(static_locals);
         funcs_out.push(af);
     }
 
@@ -178,7 +197,7 @@ fn check_calls_stmt_ext(stmt: &Stmt, defined: &HashSet<String>, builtins: &[&str
     match stmt {
         Stmt::Expr(e) => check_calls_expr_ext(e, defined, builtins, externals)?,
         Stmt::Return(Some(e)) => check_calls_expr_ext(e, defined, builtins, externals)?,
-        Stmt::Decl(_, _, Some(e)) => check_calls_expr_ext(e, defined, builtins, externals)?,
+        Stmt::Decl(_, _, Some(e), _) => check_calls_expr_ext(e, defined, builtins, externals)?,
         Stmt::If(c, t, el) => {
             check_calls_expr_ext(c, defined, builtins, externals)?;
             check_calls_stmt_ext(t, defined, builtins, externals)?;
@@ -252,7 +271,7 @@ fn analyze_func(
     mut f: FuncDef,
     globals: &HashMap<String, VarInfo>,
     struct_defs: &HashMap<String, Vec<(String, Type)>>,
-) -> Result<AnnotatedFunc, SemaError> {
+) -> Result<(AnnotatedFunc, Vec<(String, Type, Option<i32>)>), SemaError> {
     // Alpha-rename shadowed local variables so the flat HashMap can handle them.
     alpha_rename_func(&f.params, &mut f.body);
 
@@ -270,21 +289,22 @@ fn analyze_func(
 
     // Collect locals from body
     let mut local_idx = 0usize;
-    collect_locals(&f.body, &mut vars, &mut local_idx, struct_defs)?;
+    let mut static_locals: Vec<(String, Type, Option<i32>)> = Vec::new();
+    collect_locals(&f.body, &mut vars, &mut local_idx, struct_defs, &f.name, &mut static_locals)?;
 
     // Merge globals (lower priority)
     for (name, info) in globals {
         vars.entry(name.clone()).or_insert_with(|| info.clone());
     }
 
-    Ok(AnnotatedFunc {
+    Ok((AnnotatedFunc {
         name: f.name,
         ret_ty: f.ret_ty,
         params: f.params,
         n_locals: local_idx,
         body: f.body,
         vars,
-    })
+    }, static_locals))
 }
 
 fn collect_locals(
@@ -292,9 +312,11 @@ fn collect_locals(
     vars: &mut HashMap<String, VarInfo>,
     next_idx: &mut usize,
     struct_defs: &HashMap<String, Vec<(String, Type)>>,
+    func_name: &str,
+    static_locals: &mut Vec<(String, Type, Option<i32>)>,
 ) -> Result<(), SemaError> {
     for stmt in stmts {
-        collect_locals_stmt(stmt, vars, next_idx, struct_defs)?;
+        collect_locals_stmt(stmt, vars, next_idx, struct_defs, func_name, static_locals)?;
     }
     Ok(())
 }
@@ -304,32 +326,61 @@ fn collect_locals_stmt(
     vars: &mut HashMap<String, VarInfo>,
     next_idx: &mut usize,
     struct_defs: &HashMap<String, Vec<(String, Type)>>,
+    func_name: &str,
+    static_locals: &mut Vec<(String, Type, Option<i32>)>,
 ) -> Result<(), SemaError> {
     match stmt {
-        Stmt::Decl(ty, name, _) => {
-            let size = type_size(ty, struct_defs).max(1);
-            let idx = *next_idx;
-            *next_idx += size;
-            vars.insert(name.clone(), VarInfo { ty: ty.clone(), storage: VarStorage::Local(idx) });
+        Stmt::Decl(ty, name, init_expr, sc) => {
+            match sc {
+                StorageClass::Static => {
+                    // Static local — lives in global storage, not on the stack frame.
+                    // The alpha-renamed name (e.g. "i$1") gives uniqueness within the func.
+                    let sym = format!("__sl_{}_{}", func_name, name);
+                    let init_val = match init_expr {
+                        Some(e) => Some(eval_const(e)?),
+                        None => None,
+                    };
+                    vars.insert(name.clone(), VarInfo { ty: ty.clone(), storage: VarStorage::Global(sym.clone()) });
+                    static_locals.push((sym, ty.clone(), init_val));
+                }
+                StorageClass::Extern => {
+                    // Local extern declaration — refers to the file-scope global with the
+                    // base name (strip any $N alpha-rename suffix to recover original C name).
+                    let base = if let Some(pos) = name.rfind('$') {
+                        name[..pos].to_string()
+                    } else {
+                        name.clone()
+                    };
+                    let sym = format!("__g_{}", base);
+                    vars.insert(name.clone(), VarInfo { ty: ty.clone(), storage: VarStorage::Global(sym) });
+                    // No stack slot allocated.
+                }
+                StorageClass::None => {
+                    let size = type_size(ty, struct_defs).max(1);
+                    let idx = *next_idx;
+                    *next_idx += size;
+                    vars.insert(name.clone(), VarInfo { ty: ty.clone(), storage: VarStorage::Local(idx) });
+                }
+            }
         }
-        Stmt::Block(stmts) => collect_locals(stmts, vars, next_idx, struct_defs)?,
+        Stmt::Block(stmts) => collect_locals(stmts, vars, next_idx, struct_defs, func_name, static_locals)?,
         Stmt::If(_, then, els) => {
-            collect_locals_stmt(then, vars, next_idx, struct_defs)?;
-            if let Some(e) = els { collect_locals_stmt(e, vars, next_idx, struct_defs)?; }
+            collect_locals_stmt(then, vars, next_idx, struct_defs, func_name, static_locals)?;
+            if let Some(e) = els { collect_locals_stmt(e, vars, next_idx, struct_defs, func_name, static_locals)?; }
         }
-        Stmt::While(_, body) => collect_locals_stmt(body, vars, next_idx, struct_defs)?,
-        Stmt::DoWhile(body, _) => collect_locals_stmt(body, vars, next_idx, struct_defs)?,
+        Stmt::While(_, body) => collect_locals_stmt(body, vars, next_idx, struct_defs, func_name, static_locals)?,
+        Stmt::DoWhile(body, _) => collect_locals_stmt(body, vars, next_idx, struct_defs, func_name, static_locals)?,
         Stmt::For { init, body, .. } => {
-            if let Some(s) = init { collect_locals_stmt(s, vars, next_idx, struct_defs)?; }
-            collect_locals_stmt(body, vars, next_idx, struct_defs)?;
+            if let Some(s) = init { collect_locals_stmt(s, vars, next_idx, struct_defs, func_name, static_locals)?; }
+            collect_locals_stmt(body, vars, next_idx, struct_defs, func_name, static_locals)?;
         }
         Stmt::Switch { arms, .. } => {
             for arm in arms {
-                collect_locals(&arm.stmts, vars, next_idx, struct_defs)?;
+                collect_locals(arm.stmts.as_slice(), vars, next_idx, struct_defs, func_name, static_locals)?;
             }
         }
         Stmt::Return(_) | Stmt::Expr(_) | Stmt::Break | Stmt::Continue | Stmt::Goto(_) => {}
-        Stmt::Label(_, stmt) => collect_locals_stmt(stmt, vars, next_idx, struct_defs)?,
+        Stmt::Label(_, stmt) => collect_locals_stmt(stmt, vars, next_idx, struct_defs, func_name, static_locals)?,
     }
     Ok(())
 }
@@ -430,7 +481,7 @@ fn collect_strings_stmt(
     match stmt {
         Stmt::Expr(e) => collect_strings_expr(e, map, lits, counter),
         Stmt::Return(Some(e)) => collect_strings_expr(e, map, lits, counter),
-        Stmt::Decl(_, _, Some(e)) => collect_strings_expr(e, map, lits, counter),
+        Stmt::Decl(_, _, Some(e), _) => collect_strings_expr(e, map, lits, counter),
         Stmt::Block(stmts) => {
             for s in stmts { collect_strings_stmt(s, map, lits, counter); }
         }
@@ -498,7 +549,7 @@ fn alpha_rename_stmt(
     scopes: &mut Vec<HashMap<String, String>>,
 ) {
     match stmt {
-        Stmt::Decl(_, name, init) => {
+        Stmt::Decl(_, name, init, _sc) => {
             let count = counters.entry(name.clone()).or_insert(0);
             let new_name = if *count == 0 {
                 name.clone()
