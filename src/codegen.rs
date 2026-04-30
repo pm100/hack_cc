@@ -162,14 +162,29 @@ struct Gen {
     string_map: HashMap<String, String>,
     struct_defs: HashMap<String, Vec<(String, Type)>>,
     loop_ctx: Vec<(String, String)>,   // (break_label, continue_label)
+    /// When true, call sites and function returns jump to shared trampolines
+    /// (__vm_call / __vm_return) instead of emitting inline sequences.
+    use_trampolines: bool,
+    need_call_trampoline: bool,
+    need_return_trampoline: bool,
 }
 
 impl Gen {
     fn new(
         string_map: HashMap<String, String>,
         struct_defs: HashMap<String, Vec<(String, Type)>>,
+        use_trampolines: bool,
     ) -> Self {
-        Self { out: Vec::new(), label_id: 0, string_map, struct_defs, loop_ctx: Vec::new() }
+        Self {
+            out: Vec::new(),
+            label_id: 0,
+            string_map,
+            struct_defs,
+            loop_ctx: Vec::new(),
+            use_trampolines,
+            need_call_trampoline: false,
+            need_return_trampoline: false,
+        }
     }
 
     fn emit(&mut self, s: impl Into<String>) {
@@ -1195,44 +1210,61 @@ impl Gen {
             self.gen_expr(arg, vars)?;
         }
 
-        // 2. Push call overhead
-        self.emit(&format!("@{}", ret_lbl));
-        self.emit("D=A");
-        self.push_d(); // push return address
+        // 2. Push call overhead / jump via trampoline
+        if self.use_trampolines {
+            // Compact trampoline call: R13=nArgs, R14=callee, D=retAddr → __vm_call
+            self.emit(&format!("@{}", n_args));
+            self.emit("D=A");
+            self.emit("@R13");
+            self.emit("M=D");
+            self.emit(&format!("@{}", name));
+            self.emit("D=A");
+            self.emit("@R14");
+            self.emit("M=D");
+            self.emit(&format!("@{}", ret_lbl));
+            self.emit("D=A");
+            self.emit("@__vm_call");
+            self.emit("0;JMP");
+            self.need_call_trampoline = true;
+        } else {
+            self.emit(&format!("@{}", ret_lbl));
+            self.emit("D=A");
+            self.push_d(); // push return address
 
-        self.emit("@LCL");
-        self.emit("D=M");
-        self.push_d(); // push saved LCL
+            self.emit("@LCL");
+            self.emit("D=M");
+            self.push_d(); // push saved LCL
 
-        self.emit("@ARG");
-        self.emit("D=M");
-        self.push_d(); // push saved ARG
+            self.emit("@ARG");
+            self.emit("D=M");
+            self.push_d(); // push saved ARG
 
-        self.emit("@THIS");
-        self.emit("D=M");
-        self.push_d(); // push saved THIS
+            self.emit("@THIS");
+            self.emit("D=M");
+            self.push_d(); // push saved THIS
 
-        self.emit("@THAT");
-        self.emit("D=M");
-        self.push_d(); // push saved THAT
+            self.emit("@THAT");
+            self.emit("D=M");
+            self.push_d(); // push saved THAT
 
-        // 3. ARG = SP - nArgs - 5
-        self.emit("@SP");
-        self.emit("D=M");
-        self.emit(&format!("@{}", n_args + 5));
-        self.emit("D=D-A");
-        self.emit("@ARG");
-        self.emit("M=D");
+            // 3. ARG = SP - nArgs - 5
+            self.emit("@SP");
+            self.emit("D=M");
+            self.emit(&format!("@{}", n_args + 5));
+            self.emit("D=D-A");
+            self.emit("@ARG");
+            self.emit("M=D");
 
-        // 4. LCL = SP
-        self.emit("@SP");
-        self.emit("D=M");
-        self.emit("@LCL");
-        self.emit("M=D");
+            // 4. LCL = SP
+            self.emit("@SP");
+            self.emit("D=M");
+            self.emit("@LCL");
+            self.emit("M=D");
 
-        // 5. goto callee
-        self.emit(&format!("@{}", name));
-        self.emit("0;JMP");
+            // 5. goto callee
+            self.emit(&format!("@{}", name));
+            self.emit("0;JMP");
+        }
 
         self.emit(&format!("({})", ret_lbl));
         // return value is now on top of the stack
@@ -1540,67 +1572,73 @@ impl Gen {
         self.emit("@SP");
         self.emit("M=M+1");
 
-        // Return label for early exits
+        // Return label for early exits, followed by return sequence / trampoline
         self.emit(&format!("({}$return)", f.name));
 
-        // Jack VM return sequence
-        // FRAME(R13) = LCL
-        self.emit("@LCL");
-        self.emit("D=M");
-        self.emit("@R13");
-        self.emit("M=D");
+        if self.use_trampolines {
+            self.emit("@__vm_return");
+            self.emit("0;JMP");
+            self.need_return_trampoline = true;
+        } else {
+            // Jack VM return sequence
+            // FRAME(R13) = LCL
+            self.emit("@LCL");
+            self.emit("D=M");
+            self.emit("@R13");
+            self.emit("M=D");
 
-        // RET(R14) = *(FRAME-5)
-        self.emit("@5");
-        self.emit("A=D-A");
-        self.emit("D=M");
-        self.emit("@R14");
-        self.emit("M=D");
+            // RET(R14) = *(FRAME-5)
+            self.emit("@5");
+            self.emit("A=D-A");
+            self.emit("D=M");
+            self.emit("@R14");
+            self.emit("M=D");
 
-        // *ARG = return value (top of stack)
-        self.pop_d();
-        self.emit("@ARG");
-        self.emit("A=M");
-        self.emit("M=D");
+            // *ARG = return value (top of stack)
+            self.pop_d();
+            self.emit("@ARG");
+            self.emit("A=M");
+            self.emit("M=D");
 
-        // SP = ARG + 1
-        self.emit("@ARG");
-        self.emit("D=M+1");
-        self.emit("@SP");
-        self.emit("M=D");
+            // SP = ARG + 1
+            self.emit("@ARG");
+            self.emit("D=M+1");
+            self.emit("@SP");
+            self.emit("M=D");
 
-        // THAT = *(FRAME-1)
-        self.emit("@R13");
-        self.emit("AM=M-1");
-        self.emit("D=M");
-        self.emit("@THAT");
-        self.emit("M=D");
+            // THAT = *(FRAME-1)
+            self.emit("@R13");
+            self.emit("AM=M-1");
+            self.emit("D=M");
+            self.emit("@THAT");
+            self.emit("M=D");
 
-        // THIS = *(FRAME-2)
-        self.emit("@R13");
-        self.emit("AM=M-1");
-        self.emit("D=M");
-        self.emit("@THIS");
-        self.emit("M=D");
+            // THIS = *(FRAME-2)
+            self.emit("@R13");
+            self.emit("AM=M-1");
+            self.emit("D=M");
+            self.emit("@THIS");
+            self.emit("M=D");
 
-        // ARG = *(FRAME-3)
-        self.emit("@R13");
-        self.emit("AM=M-1");
-        self.emit("D=M");
-        self.emit("@ARG");
-        self.emit("M=D");
+            // ARG = *(FRAME-3)
+            self.emit("@R13");
+            self.emit("AM=M-1");
+            self.emit("D=M");
+            self.emit("@ARG");
+            self.emit("M=D");
 
-        // LCL = *(FRAME-4)
-        self.emit("@R13");
-        self.emit("AM=M-1");
-        self.emit("D=M");
-        self.emit("@LCL");
-        self.emit("M=D");
+            // LCL = *(FRAME-4)
+            self.emit("@R13");
+            self.emit("AM=M-1");
+            self.emit("D=M");
+            self.emit("@LCL");
+            self.emit("M=D");
 
-        // goto RET
-        self.emit("@R14");
-        self.emit("A=M");
-        self.emit("0;JMP");
+            // goto RET
+            self.emit("@R14");
+            self.emit("A=M");
+            self.emit("0;JMP");
+        }
 
         Ok(())
     }
@@ -1732,6 +1770,21 @@ pub fn gen_font_init_asm() -> String {
     out
 }
 
+/// Return the font table as static `DataInit` entries (for `RAM@` sections in
+/// hackem / tst output, avoiding runtime init instructions in the bootstrap).
+pub fn gen_font_data_inits() -> Vec<DataInit> {
+    let mut data = Vec::new();
+    for ch_idx in 0..96usize {
+        for row in 0..11usize {
+            let byte = FONT_8X11[ch_idx][row];
+            if byte == 0 { continue; }
+            let addr = (FONT_BASE + ch_idx * 11 + row) as u16;
+            data.push(DataInit { address: addr, value: byte as i16 });
+        }
+    }
+    data
+}
+
 /// calls `main`, and halts.  `init_code` is inserted between the SP
 /// initialization and the call to `main` — use it to initialize global
 /// variables and string literals.
@@ -1746,15 +1799,11 @@ pub fn gen_bootstrap(init_code: &str) -> String {
         lines.push(init_code.trim_end().to_string());
     }
     let tail: &[&str] = &[
+        // Call main via __vm_call trampoline: R13=0 (nArgs), R14=main addr, D=retAddr
+        "@0", "D=A", "@R13", "M=D",
+        "@main", "D=A", "@R14", "M=D",
         "@__ld_main_ret", "D=A",
-        "@SP", "A=M", "M=D", "@SP", "M=M+1",
-        "@LCL",  "D=M", "@SP", "A=M", "M=D", "@SP", "M=M+1",
-        "@ARG",  "D=M", "@SP", "A=M", "M=D", "@SP", "M=M+1",
-        "@THIS", "D=M", "@SP", "A=M", "M=D", "@SP", "M=M+1",
-        "@THAT", "D=M", "@SP", "A=M", "M=D", "@SP", "M=M+1",
-        "@SP", "D=M", "@5", "D=D-A", "@ARG", "M=D",
-        "@SP", "D=M", "@LCL", "M=D",
-        "@main", "0;JMP",
+        "@__vm_call", "0;JMP",
         "(__ld_main_ret)",
         "(__end)", "@__end", "0;JMP",
         "",
@@ -1797,7 +1846,7 @@ fn generate_inner(sema: SemaResult, body_only: bool) -> Result<CompiledProgram, 
     }
 
     // ── Phase 2: Generate code ───────────────────────────────────────────────
-    let mut g = Gen::new(sema.string_map.clone(), sema.struct_defs.clone());
+    let mut g = Gen::new(sema.string_map.clone(), sema.struct_defs.clone(), true);
 
     if !body_only {
         g.emit("// Bootstrap");
@@ -1869,42 +1918,25 @@ fn generate_inner(sema: SemaResult, body_only: bool) -> Result<CompiledProgram, 
             }
         }
 
-        // Call main (Jack VM calling convention)
-        let id = g.label();
-        let ret_lbl = format!("main$ret_{}", id);
-        g.emit(&format!("@{}", ret_lbl));
+        // Call main via trampoline: R13=0 (nArgs), R14=main addr, D=retAddr
+        g.emit("@0");
         g.emit("D=A");
-        g.emit("@SP");
-        g.emit("A=M");
-        g.emit("M=D");
-        g.emit("@SP");
-        g.emit("M=M+1");
-        for reg in &["LCL", "ARG", "THIS", "THAT"] {
-            g.emit(&format!("@{}", reg));
-            g.emit("D=M");
-            g.emit("@SP");
-            g.emit("A=M");
-            g.emit("M=D");
-            g.emit("@SP");
-            g.emit("M=M+1");
-        }
-        g.emit("@SP");
-        g.emit("D=M");
-        g.emit("@5");
-        g.emit("D=D-A");
-        g.emit("@ARG");
-        g.emit("M=D");
-        g.emit("@SP");
-        g.emit("D=M");
-        g.emit("@LCL");
+        g.emit("@R13");
         g.emit("M=D");
         g.emit("@main");
+        g.emit("D=A");
+        g.emit("@R14");
+        g.emit("M=D");
+        g.emit("@__ld_main_ret");
+        g.emit("D=A");
+        g.emit("@__vm_call");
         g.emit("0;JMP");
-        g.emit(&format!("({})", ret_lbl));
+        g.emit("(__ld_main_ret)");
         g.emit("(__end)");
         g.emit("@__end");
         g.emit("0;JMP");
         g.emit("");
+        g.need_call_trampoline = true;
     }
 
     // Emit only reachable user-defined functions
@@ -1912,6 +1944,72 @@ fn generate_inner(sema: SemaResult, body_only: bool) -> Result<CompiledProgram, 
         if reachable.contains(&f.name) {
             g.emit("");
             g.gen_func(f)?;
+        }
+    }
+
+    // Emit shared VM trampolines inline (whole-program mode only).
+    // In body_only mode the trampolines come from lib/sys/__vm_call.s and __vm_return.s.
+    if !body_only {
+        if g.need_call_trampoline {
+            g.emit("");
+            g.emit("// VM call trampoline: R13=nArgs, R14=callee_addr, D=retAddr");
+            g.emit("(__vm_call)");
+            // push retAddr (D)
+            g.emit("@SP"); g.emit("A=M"); g.emit("M=D"); g.emit("@SP"); g.emit("M=M+1");
+            // push LCL
+            g.emit("@LCL"); g.emit("D=M");
+            g.emit("@SP"); g.emit("A=M"); g.emit("M=D"); g.emit("@SP"); g.emit("M=M+1");
+            // push ARG
+            g.emit("@ARG"); g.emit("D=M");
+            g.emit("@SP"); g.emit("A=M"); g.emit("M=D"); g.emit("@SP"); g.emit("M=M+1");
+            // push THIS
+            g.emit("@THIS"); g.emit("D=M");
+            g.emit("@SP"); g.emit("A=M"); g.emit("M=D"); g.emit("@SP"); g.emit("M=M+1");
+            // push THAT
+            g.emit("@THAT"); g.emit("D=M");
+            g.emit("@SP"); g.emit("A=M"); g.emit("M=D"); g.emit("@SP"); g.emit("M=M+1");
+            // ARG = SP - R13 - 5
+            g.emit("@SP"); g.emit("D=M");
+            g.emit("@5"); g.emit("D=D-A");
+            g.emit("@R13"); g.emit("D=D-M");
+            g.emit("@ARG"); g.emit("M=D");
+            // LCL = SP
+            g.emit("@SP"); g.emit("D=M");
+            g.emit("@LCL"); g.emit("M=D");
+            // goto callee (address in R14)
+            g.emit("@R14"); g.emit("A=M"); g.emit("0;JMP");
+        }
+
+        if g.need_return_trampoline {
+            g.emit("");
+            g.emit("// VM return trampoline");
+            g.emit("(__vm_return)");
+            // FRAME(R13) = LCL
+            g.emit("@LCL"); g.emit("D=M");
+            g.emit("@R13"); g.emit("M=D");
+            // RET(R14) = *(FRAME-5)
+            g.emit("@5"); g.emit("A=D-A"); g.emit("D=M");
+            g.emit("@R14"); g.emit("M=D");
+            // *ARG = retval (top of stack)
+            g.emit("@SP"); g.emit("M=M-1"); g.emit("A=M"); g.emit("D=M");
+            g.emit("@ARG"); g.emit("A=M"); g.emit("M=D");
+            // SP = ARG + 1
+            g.emit("@ARG"); g.emit("D=M+1");
+            g.emit("@SP"); g.emit("M=D");
+            // THAT = *(FRAME-1)
+            g.emit("@R13"); g.emit("AM=M-1"); g.emit("D=M");
+            g.emit("@THAT"); g.emit("M=D");
+            // THIS = *(FRAME-2)
+            g.emit("@R13"); g.emit("AM=M-1"); g.emit("D=M");
+            g.emit("@THIS"); g.emit("M=D");
+            // ARG = *(FRAME-3)
+            g.emit("@R13"); g.emit("AM=M-1"); g.emit("D=M");
+            g.emit("@ARG"); g.emit("M=D");
+            // LCL = *(FRAME-4)
+            g.emit("@R13"); g.emit("AM=M-1"); g.emit("D=M");
+            g.emit("@LCL"); g.emit("M=D");
+            // goto retAddr
+            g.emit("@R14"); g.emit("A=M"); g.emit("0;JMP");
         }
     }
 

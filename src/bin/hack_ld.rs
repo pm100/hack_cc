@@ -21,7 +21,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 use hack_cc::output::{OutputFormat, emit};
-use hack_cc::codegen::{gen_bootstrap, CompiledProgram};
+use hack_cc::codegen::{gen_bootstrap, gen_font_init_asm, gen_font_data_inits, CompiledProgram, DataInit};
 use hack_cc::linker::{link, default_lib_dirs};
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -108,6 +108,19 @@ fn main() {
         cli.lib_dirs.clone()
     };
 
+    // ── Determine output format early (affects how font table is handled) ────
+    let fmt_enum = cli.format.clone().or_else(|| {
+        cli.output.as_ref().and_then(|p| {
+            match p.extension().and_then(|e| e.to_str()) {
+                Some("hackem") => Some(Format::Hackem),
+                Some("hack")   => Some(Format::Hack),
+                Some("tst")    => Some(Format::Tst),
+                Some("asm")    => Some(Format::Asm),
+                _              => None,
+            }
+        })
+    }).unwrap_or(Format::Asm);
+
     // ── Step 1: Read and parse all .s files ─────────────────────────────────
     let mut parsed: Vec<ParsedSFile> = Vec::new();
     for path in &cli.inputs {
@@ -128,34 +141,46 @@ fn main() {
 
     // ── Step 3: Build combined ASM with bootstrap containing init code ───────
     let init_code = gen_init_code(&combined_data);
-    let bootstrap = gen_bootstrap(&init_code);
-    let mut combined_asm = bootstrap;
-    for sf in &parsed {
-        combined_asm.push('\n');
-        combined_asm.push_str(&sf.asm_text);
-    }
 
-    // ── Step 4: Runtime symbol-scan linker ──────────────────────────────────
-    let linked_asm = link(&combined_asm, &lib_dirs);
-
-    // ── Step 5: Wrap into CompiledProgram and emit ───────────────────────────
-    // No DataInit entries (font table only comes from whole-program compilation)
-    let prog = CompiledProgram {
-        asm: linked_asm,
-        data: Vec::new(),
+    let build_combined = |extra_init: &str| -> String {
+        let full_init = if extra_init.is_empty() {
+            init_code.clone()
+        } else {
+            format!("{}\n{}", extra_init, init_code)
+        };
+        let bootstrap = gen_bootstrap(&full_init);
+        let mut combined = bootstrap;
+        for sf in &parsed {
+            combined.push('\n');
+            combined.push_str(&sf.asm_text);
+        }
+        combined
     };
 
-    let fmt_enum = cli.format.or_else(|| {
-        cli.output.as_ref().and_then(|p| {
-            match p.extension().and_then(|e| e.to_str()) {
-                Some("hackem") => Some(Format::Hackem),
-                Some("hack")   => Some(Format::Hack),
-                Some("tst")    => Some(Format::Tst),
-                Some("asm")    => Some(Format::Asm),
-                _              => None,
+    // ── Step 4: Runtime symbol-scan linker ──────────────────────────────────
+    // First pass: link without font init to discover which library modules are needed.
+    let first_pass = link(&build_combined(""), &lib_dirs);
+    let needs_font = first_pass.contains("(__draw_char)");
+
+    // For hackem/tst output the font table is pre-loaded as static RAM@ data
+    // (no bootstrap ASM needed).  For asm/hack output it must be inlined.
+    let (linked_asm, font_data): (String, Vec<DataInit>) = if needs_font {
+        match fmt_enum {
+            Format::Hackem | Format::Tst => {
+                // Font goes into RAM@ sections — no inline init ASM required.
+                (first_pass, gen_font_data_inits())
             }
-        })
-    }).unwrap_or(Format::Asm);
+            _ => {
+                // Font init as bootstrap ASM for formats without a RAM@ section.
+                (link(&build_combined(&gen_font_init_asm()), &lib_dirs), Vec::new())
+            }
+        }
+    } else {
+        (first_pass, Vec::new())
+    };
+
+    // ── Step 5: Wrap into CompiledProgram and emit ───────────────────────────
+    let prog = CompiledProgram { asm: linked_asm, data: font_data };
 
     let fmt = match fmt_enum {
         Format::Asm    => OutputFormat::Asm,

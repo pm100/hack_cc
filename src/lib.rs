@@ -286,21 +286,29 @@ fn link_objects(texts: &[String], lib_dirs: &[PathBuf]) -> Result<CompiledProgra
         combined_bodies.push('\n');
     }
 
-    // 3. Run runtime linker on bodies (pulls in needed library modules)
-    let linked_bodies = linker::link(&combined_bodies, lib_dirs);
-
-    // 4. Detect font usage: __draw_char linked in iff its label appears
-    let needs_font = linked_bodies.contains("(__draw_char)");
-
-    // 5. Build init code: data init + (font init if needed)
-    let mut init_code = gen_data_init_code(&data_entries);
-    if needs_font {
-        init_code.push_str(&codegen::gen_font_init_asm());
-    }
-
-    // 6. Build bootstrap and prepend to linked bodies
+    // 3. Run the runtime linker on bootstrap+bodies so that symbols referenced
+    //    by the bootstrap (e.g. @__vm_call) are included in symbol discovery.
+    //    Programs with no explicit function calls only reference @__vm_return in
+    //    their bodies; without the bootstrap in scope, @__vm_call would be missed
+    //    and allocated as a RAM variable instead of resolving to the trampoline.
+    let init_code = gen_data_init_code(&data_entries);
     let bootstrap = codegen::gen_bootstrap(&init_code);
-    let asm = format!("{}\n{}", bootstrap, linked_bodies);
+    let combined = format!("{}\n{}", bootstrap, combined_bodies);
+    let linked = linker::link(&combined, lib_dirs);
+
+    // 4. Detect font usage: __draw_char is linked in only when needed.
+    let needs_font = linked.contains("(__draw_char)");
+
+    // 5. If font is needed, rebuild with font init prepended to the bootstrap.
+    let asm = if needs_font {
+        let mut full_init = gen_data_init_code(&data_entries);
+        full_init.push_str(&codegen::gen_font_init_asm());
+        let full_bootstrap = codegen::gen_bootstrap(&full_init);
+        let combined2 = format!("{}\n{}", full_bootstrap, combined_bodies);
+        linker::link(&combined2, lib_dirs)
+    } else {
+        linked
+    };
 
     Ok(CompiledProgram { asm, data: Vec::new() })
 }
