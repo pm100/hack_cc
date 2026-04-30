@@ -94,6 +94,35 @@ pub fn compile_with_full_options(
     Ok(compiled)
 }
 
+/// Compile a single C source file to an annotated `.s` object file, with full options.
+///
+/// Like [`compile_to_object`] but honours `-I` include directories and `-D` pre-defined macros.
+pub fn compile_to_object_with_options(
+    source: &str,
+    base_dir: Option<&std::path::Path>,
+    opts: &CompileOptions,
+) -> Result<String, Error> {
+    let expanded = preprocessor::preprocess_with_predefined(source, base_dir, &opts.include_dirs, &opts.defines)?;
+    let tokens = lexer::lex(&expanded)?;
+    let program = parser::parse(tokens)?;
+
+    let provides: Vec<String> = program.funcs.iter()
+        .filter(|f| !f.is_decl)
+        .map(|f| f.name.clone())
+        .collect();
+
+    let sema_result = sema::analyze(program)?;
+
+    let string_literals = sema_result.string_literals.clone();
+    let globals_info = sema_result.globals.clone();
+    let struct_defs = sema_result.struct_defs.clone();
+
+    let compiled = codegen::generate_body_only(sema_result)?;
+
+    let out = build_object_text(&provides, &string_literals, &globals_info, &struct_defs, &compiled);
+    Ok(out)
+}
+
 /// Compile a single C source file to an annotated `.s` object file.
 ///
 /// The resulting string is a `.s` file with `.provides` and `.data` directives

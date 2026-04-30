@@ -54,12 +54,26 @@ fn main() {
             eprintln!("error: -o cannot be used with -c when compiling multiple files");
             std::process::exit(1);
         }
+        // Build options (include dirs + defines) for -c mode.
+        let mut c_defines: HashMap<String, String> = HashMap::new();
+        for d in &cli.defines {
+            if let Some((name, value)) = d.split_once('=') {
+                c_defines.insert(name.to_string(), value.to_string());
+            } else {
+                c_defines.insert(d.clone(), "1".to_string());
+            }
+        }
+        let c_opts = hack_cc::CompileOptions {
+            include_dirs: cli.include_dirs.clone(),
+            defines: c_defines,
+            lib_dirs: Vec::new(), // not needed for object compilation
+        };
         for input in &cli.inputs {
             let src = std::fs::read_to_string(input).unwrap_or_else(|e| {
                 eprintln!("error reading {:?}: {}", input, e);
                 std::process::exit(1);
             });
-            let obj_s = hack_cc::compile_to_object(&src, input.parent()).unwrap_or_else(|e| {
+            let obj_s = hack_cc::compile_to_object_with_options(&src, input.parent(), &c_opts).unwrap_or_else(|e| {
                 eprintln!("compile error in {:?}: {}", input, e);
                 std::process::exit(1);
             });
