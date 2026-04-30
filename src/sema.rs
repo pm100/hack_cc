@@ -41,6 +41,8 @@ pub struct SemaResult {
     pub globals: Vec<(String, Type, Option<i32>)>, // name, ty, init
     pub funcs: Vec<AnnotatedFunc>,
     pub func_sigs: HashMap<String, (Type, usize)>, // name -> (ret_ty, n_params)
+    /// Return type for each function name (for codegen to know call return type).
+    pub func_return_types: HashMap<String, Type>,
     /// Symbol prefix and char values (without null terminator) for each string literal.
     pub string_literals: Vec<(String, Vec<i16>)>,
     /// Map from string content to its assembler symbol prefix (for codegen lookup).
@@ -53,7 +55,8 @@ pub struct SemaResult {
 pub fn type_size(ty: &Type, defs: &HashMap<String, Vec<(String, Type)>>) -> usize {
     match ty {
         Type::Void => 0,
-        Type::Int | Type::Char | Type::Ptr(_) | Type::Long => 1,
+        Type::Int | Type::Char | Type::Ptr(_) => 1,
+        Type::Long => 2,
         Type::Array(base, n) => type_size(base, defs) * n,
         Type::Struct(name) => {
             defs.get(name)
@@ -141,7 +144,12 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
         check_calls_defined_ext(&af.body, &defined_funcs, &[], user_externals)?;
     }
 
-    Ok(SemaResult { globals: globals_out, funcs: funcs_out, func_sigs, string_literals, string_map, struct_defs })
+    // Build func_return_types from func_sigs
+    let func_return_types: HashMap<String, Type> = func_sigs.iter()
+        .map(|(name, (ret_ty, _))| (name.clone(), ret_ty.clone()))
+        .collect();
+
+    Ok(SemaResult { globals: globals_out, funcs: funcs_out, func_sigs, func_return_types, string_literals, string_map, struct_defs })
 }
 
 fn eval_const(expr: &Expr) -> Result<i32, SemaError> {
@@ -250,12 +258,14 @@ fn analyze_func(
 
     let mut vars: HashMap<String, VarInfo> = HashMap::new();
 
-    // Insert params
-    for (i, (ty, name)) in f.params.iter().enumerate() {
+    // Insert params — offsets are word-based (Long params take 2 slots)
+    let mut param_offset = 0usize;
+    for (ty, name) in f.params.iter() {
         vars.insert(name.clone(), VarInfo {
             ty: ty.clone(),
-            storage: VarStorage::Param(i),
+            storage: VarStorage::Param(param_offset),
         });
+        param_offset += type_size(ty, struct_defs).max(1);
     }
 
     // Collect locals from body

@@ -100,19 +100,22 @@ fn in_skip_dir(path: &Path) -> bool {
 /// Our compiler targets the 16-bit Hack CPU, so such tests are inherently
 /// unsupported and should be skipped rather than counted as failures.
 fn has_out_of_range_literal(src: &str) -> bool {
-    // Simple scan: find runs of digits and check their value.
     let bytes = src.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i].is_ascii_digit() {
-            // Collect the whole decimal run.
             let start = i;
             while i < bytes.len() && bytes[i].is_ascii_digit() {
                 i += 1;
             }
-            let num_str = &src[start..i];
+            let digit_end = i;
+            // Skip over integer suffix characters so they don't affect length check.
+            while i < bytes.len() && matches!(bytes[i], b'l' | b'L' | b'u' | b'U') {
+                i += 1;
+            }
+            let num_str = &src[start..digit_end];
             if num_str.len() > 5 {
-                // More than 5 digits → definitely > 32767, skip.
+                // More than 5 digits → definitely > 32767
                 return true;
             }
             if let Ok(n) = num_str.parse::<u64>() {

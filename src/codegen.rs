@@ -167,6 +167,9 @@ struct Gen {
     use_trampolines: bool,
     need_call_trampoline: bool,
     need_return_trampoline: bool,
+    func_return_types: HashMap<String, Type>,
+    current_ret_ty: Type,
+    need_return_long_trampoline: bool,
 }
 
 impl Gen {
@@ -174,6 +177,7 @@ impl Gen {
         string_map: HashMap<String, String>,
         struct_defs: HashMap<String, Vec<(String, Type)>>,
         use_trampolines: bool,
+        func_return_types: HashMap<String, Type>,
     ) -> Self {
         Self {
             out: Vec::new(),
@@ -184,6 +188,9 @@ impl Gen {
             use_trampolines,
             need_call_trampoline: false,
             need_return_trampoline: false,
+            func_return_types,
+            current_ret_ty: Type::Int,
+            need_return_long_trampoline: false,
         }
     }
 
@@ -356,10 +363,327 @@ impl Gen {
         Err(CodegenError::new(format!("struct '{}' has no field '{}'", struct_name, field_name)))
     }
 
+    /// Emit D = val (any i16, avoiding @N for N > 32767)
+    fn emit_d_load_i16(&mut self, val: i16) {
+        match val {
+            0 => self.emit("D=0"),
+            1 => self.emit("D=1"),
+            -1 => self.emit("D=-1"),
+            v if v == i16::MIN => {
+                self.emit("@32767");
+                self.emit("D=-A");
+                self.emit("D=D-1");
+            }
+            v if v > 0 => {
+                self.emit(&format!("@{}", v));
+                self.emit("D=A");
+            }
+            v => {
+                self.emit(&format!("@{}", -(v as i32)));
+                self.emit("D=-A");
+            }
+        }
+    }
+
+    /// Push hi then lo for a Long variable (lo ends up on top of stack)
+    fn load_var_long(&mut self, info: &VarInfo) {
+        match &info.storage {
+            VarStorage::Local(idx) => {
+                let idx = *idx;
+                // push hi (idx)
+                if idx == 0 {
+                    self.emit("@LCL");
+                    self.emit("A=M");
+                    self.emit("D=M");
+                } else {
+                    self.emit("@LCL");
+                    self.emit("D=M");
+                    self.emit(&format!("@{}", idx));
+                    self.emit("A=D+A");
+                    self.emit("D=M");
+                }
+                self.push_d();
+                // push lo (idx+1)
+                let idx1 = idx + 1;
+                self.emit("@LCL");
+                self.emit("D=M");
+                self.emit(&format!("@{}", idx1));
+                self.emit("A=D+A");
+                self.emit("D=M");
+                self.push_d();
+            }
+            VarStorage::Param(idx) => {
+                let idx = *idx;
+                // push hi (idx)
+                if idx == 0 {
+                    self.emit("@ARG");
+                    self.emit("A=M");
+                    self.emit("D=M");
+                } else {
+                    self.emit("@ARG");
+                    self.emit("D=M");
+                    self.emit(&format!("@{}", idx));
+                    self.emit("A=D+A");
+                    self.emit("D=M");
+                }
+                self.push_d();
+                // push lo (idx+1)
+                let idx1 = idx + 1;
+                self.emit("@ARG");
+                self.emit("D=M");
+                self.emit(&format!("@{}", idx1));
+                self.emit("A=D+A");
+                self.emit("D=M");
+                self.push_d();
+            }
+            VarStorage::Global(sym) => {
+                let sym = sym.clone();
+                self.emit(&format!("@{}", sym));
+                self.emit("D=M");
+                self.push_d(); // hi
+                let sym_lo = format!("{}_1", sym);
+                self.emit(&format!("@{}", sym_lo));
+                self.emit("D=M");
+                self.push_d(); // lo
+            }
+        }
+    }
+
+    /// Store hi (R13) and lo (R14) to consecutive Long variable slots
+    fn store_var_long_r13r14(&mut self, info: &VarInfo) {
+        match &info.storage {
+            VarStorage::Local(idx) => {
+                let idx = *idx;
+                // Store hi (R13) to LCL[idx]
+                self.emit("@LCL");
+                self.emit("D=M");
+                if idx > 0 {
+                    self.emit(&format!("@{}", idx));
+                    self.emit("D=D+A");
+                }
+                self.emit("@R15");
+                self.emit("M=D");
+                self.emit("@R13");
+                self.emit("D=M");
+                self.emit("@R15");
+                self.emit("A=M");
+                self.emit("M=D");
+                // Store lo (R14) to LCL[idx+1]
+                let idx1 = idx + 1;
+                self.emit("@LCL");
+                self.emit("D=M");
+                self.emit(&format!("@{}", idx1));
+                self.emit("D=D+A");
+                self.emit("@R15");
+                self.emit("M=D");
+                self.emit("@R14");
+                self.emit("D=M");
+                self.emit("@R15");
+                self.emit("A=M");
+                self.emit("M=D");
+            }
+            VarStorage::Param(idx) => {
+                let idx = *idx;
+                // Store hi (R13) to ARG[idx]
+                self.emit("@ARG");
+                self.emit("D=M");
+                if idx > 0 {
+                    self.emit(&format!("@{}", idx));
+                    self.emit("D=D+A");
+                }
+                self.emit("@R15");
+                self.emit("M=D");
+                self.emit("@R13");
+                self.emit("D=M");
+                self.emit("@R15");
+                self.emit("A=M");
+                self.emit("M=D");
+                // Store lo (R14) to ARG[idx+1]
+                let idx1 = idx + 1;
+                self.emit("@ARG");
+                self.emit("D=M");
+                self.emit(&format!("@{}", idx1));
+                self.emit("D=D+A");
+                self.emit("@R15");
+                self.emit("M=D");
+                self.emit("@R14");
+                self.emit("D=M");
+                self.emit("@R15");
+                self.emit("A=M");
+                self.emit("M=D");
+            }
+            VarStorage::Global(sym) => {
+                let sym = sym.clone();
+                self.emit("@R13");
+                self.emit("D=M");
+                self.emit(&format!("@{}", sym));
+                self.emit("M=D");
+                self.emit("@R14");
+                self.emit("D=M");
+                self.emit(&format!("@{}_1", sym));
+                self.emit("M=D");
+            }
+        }
+    }
+
+    /// Load a 2-word Long from address held in D.
+    /// Saves addr to R13. Stack after: [..., hi, lo] with lo on top.
+    fn load_long_from_addr_d(&mut self) {
+        self.emit("@R13");
+        self.emit("M=D");       // R13 = addr
+        self.emit("A=D");
+        self.emit("D=M");       // D = hi = mem[addr]
+        self.push_d();
+        self.emit("@R13");
+        self.emit("D=M+1");     // D = addr+1
+        self.emit("A=D");
+        self.emit("D=M");       // D = lo = mem[addr+1]
+        self.push_d();
+    }
+
+    /// Store Long (R5=hi, R6=lo) to address held in D. Uses R15 as scratch.
+    fn store_long_r5r6_at_addr_d(&mut self) {
+        self.emit("@R15");
+        self.emit("M=D");       // R15 = addr
+        self.emit("@R5");
+        self.emit("D=M");       // D = hi
+        self.emit("@R15");
+        self.emit("A=M");
+        self.emit("M=D");       // mem[addr] = hi
+        self.emit("@R6");
+        self.emit("D=M");       // D = lo
+        self.emit("@R15");
+        self.emit("A=M+1");     // A = addr+1
+        self.emit("M=D");       // mem[addr+1] = lo
+    }
+
+    /// Sign-extend top-of-stack (1-word int) to 2-word Long.
+    /// Stack before: [... val]; after: [... hi lo] with lo on top.
+    fn sign_extend_to_long(&mut self) {
+        self.pop_d(); // D = value (lo word)
+        self.emit("@R13");
+        self.emit("M=D"); // R13 = lo
+        let id = self.label();
+        let l_neg = format!("__signext_n_{}", id);
+        let l_end = format!("__signext_e_{}", id);
+        self.emit(&format!("@{}", l_neg));
+        self.emit("D;JLT");
+        self.emit("D=0");
+        self.emit(&format!("@{}", l_end));
+        self.emit("0;JMP");
+        self.emit(&format!("({})", l_neg));
+        self.emit("D=-1");
+        self.emit(&format!("({})", l_end));
+        self.push_d(); // push hi
+        self.emit("@R13");
+        self.emit("D=M");
+        self.push_d(); // push lo
+    }
+
+    /// Pop lo then hi from stack (lo on top), store to R5=hi, R6=lo
+    fn pop_long_to_r56(&mut self) {
+        self.pop_d();
+        self.emit("@R6");
+        self.emit("M=D"); // R6 = lo
+        self.pop_d();
+        self.emit("@R5");
+        self.emit("M=D"); // R5 = hi
+    }
+
+    /// Pop two longs: b on top [lo_b, hi_b, lo_a, hi_a from top to bottom]
+    /// Results: R5=hi_a, R6=lo_a, R7=hi_b, R8=lo_b
+    fn pop_long_pair_to_r5678(&mut self) {
+        self.pop_d(); self.emit("@R8"); self.emit("M=D"); // lo_b
+        self.pop_d(); self.emit("@R7"); self.emit("M=D"); // hi_b
+        self.pop_d(); self.emit("@R6"); self.emit("M=D"); // lo_a
+        self.pop_d(); self.emit("@R5"); self.emit("M=D"); // hi_a
+    }
+
+    /// Push R5:R6 as Long (hi=R5, lo=R6)
+    fn push_long_from_r56(&mut self) {
+        self.emit("@R5"); self.emit("D=M"); self.push_d();
+        self.emit("@R6"); self.emit("D=M"); self.push_d();
+    }
+
+    /// Call an R3-convention helper (set up return label, jump to helper)
+    fn call_r3_helper(&mut self, name: &str) {
+        let id = self.label();
+        let ret = format!("{}_ret_{}", name, id);
+        self.emit(&format!("@{}", ret));
+        self.emit("D=A");
+        self.emit("@R3");
+        self.emit("M=D");
+        self.emit(&format!("@{}", name));
+        self.emit("0;JMP");
+        self.emit(&format!("({})", ret));
+    }
+
+    /// Evaluate expr and ensure 2 words on stack (sign-extend if needed)
+    fn gen_expr_as_long(&mut self, expr: &Expr, vars: &HashMap<String, VarInfo>) -> Result<(), CodegenError> {
+        let ty = self.expr_type(expr, vars).unwrap_or(Type::Int);
+        self.gen_expr(expr, vars)?;
+        if !matches!(ty, Type::Long) {
+            self.sign_extend_to_long();
+        }
+        Ok(())
+    }
+
+    /// Get the type of an lvalue expression
+    fn lvalue_type(&self, expr: &Expr, vars: &HashMap<String, VarInfo>) -> Option<Type> {
+        match expr {
+            Expr::Ident(name) => vars.get(name).map(|v| v.ty.clone()),
+            Expr::UnOp(UnOp::Deref, inner) => match self.expr_type(inner, vars)? {
+                Type::Ptr(t) => Some(*t),
+                Type::Array(t, _) => Some(*t),
+                _ => None,
+            },
+            Expr::Index(base, _) => match self.expr_type(base, vars)? {
+                Type::Ptr(t) => Some(*t),
+                Type::Array(t, _) => Some(*t),
+                _ => None,
+            },
+            Expr::Member(base, field) => {
+                if let Some(Type::Struct(sname)) = self.expr_type(base, vars) {
+                    self.struct_defs.get(&sname)
+                        .and_then(|fields| fields.iter().find(|(fn_, _)| fn_ == field))
+                        .map(|(_, ty)| ty.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Evaluate condition expr; collapses Long to single word in D (hi|lo).
+    /// After this, D is 0 for false, nonzero for true.
+    fn gen_cond_d(&mut self, cond_expr: &Expr, vars: &HashMap<String, VarInfo>) -> Result<(), CodegenError> {
+        let ty = self.expr_type(cond_expr, vars).unwrap_or(Type::Int);
+        self.gen_expr(cond_expr, vars)?;
+        if matches!(ty, Type::Long) {
+            self.pop_d();
+            self.emit("@R13");
+            self.emit("M=D");  // R13 = lo
+            self.pop_d();      // D = hi
+            self.emit("@R13");
+            self.emit("D=D|M"); // D = hi | lo
+        } else {
+            self.pop_d();
+        }
+        Ok(())
+    }
+
     /// Infer the type of an expression without generating code.
     fn expr_type(&self, expr: &Expr, vars: &HashMap<String, VarInfo>) -> Option<Type> {
         match expr {
-            Expr::Num(_) => Some(Type::Int),
+            Expr::Num(n) => {
+                let n = *n;
+                if n > i16::MAX as i32 || n < i16::MIN as i32 {
+                    Some(Type::Long)
+                } else {
+                    Some(Type::Int)
+                }
+            }
             Expr::StringLit(_) => Some(Type::Ptr(Box::new(Type::Char))),
             Expr::Sizeof(_) => Some(Type::Int),
             Expr::Ident(name) => vars.get(name).map(|v| v.ty.clone()),
@@ -385,6 +709,27 @@ impl Gen {
                 Type::Array(t, _) => Some(*t),
                 _ => None,
             },
+            Expr::BinOp(op, lhs, rhs) => {
+                match op {
+                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le
+                    | BinOp::Gt | BinOp::Ge | BinOp::And | BinOp::Or => Some(Type::Int),
+                    _ => {
+                        let lt = self.expr_type(lhs, vars)?;
+                        let rt = self.expr_type(rhs, vars)?;
+                        if matches!(lt, Type::Long) || matches!(rt, Type::Long) {
+                            Some(Type::Long)
+                        } else {
+                            Some(lt)
+                        }
+                    }
+                }
+            }
+            Expr::Call(name, _) => self.func_return_types.get(name).cloned(),
+            Expr::Cast(ty, _) => Some(ty.clone()),
+            Expr::Ternary(_, then_e, _) => self.expr_type(then_e, vars),
+            Expr::PostInc(inner) | Expr::PostDec(inner) => self.expr_type(inner, vars),
+            Expr::UnOp(UnOp::Neg, inner) | Expr::UnOp(UnOp::BitNot, inner) => self.expr_type(inner, vars),
+            Expr::UnOp(UnOp::Not, _) => Some(Type::Int),
             _ => None,
         }
     }
@@ -400,21 +745,32 @@ impl Gen {
         match expr {
             Expr::Num(n) => {
                 let n = *n;
-                if n == 0 {
+                if n > i16::MAX as i32 || n < i16::MIN as i32 {
+                    // Large value: push as Long (2 words, hi then lo)
+                    let hi = ((n as u32 >> 16) & 0xFFFF) as i16;
+                    let lo = (n as u16) as i16;
+                    self.emit_d_load_i16(hi);
+                    self.push_d();
+                    self.emit_d_load_i16(lo);
+                    self.push_d();
+                } else if n == 0 {
                     self.emit("D=0");
+                    self.push_d();
                 } else if n == 1 {
                     self.emit("D=1");
+                    self.push_d();
                 } else if n == -1 {
                     self.emit("D=-1");
+                    self.push_d();
                 } else if n > 0 {
                     self.emit(&format!("@{}", n));
                     self.emit("D=A");
+                    self.push_d();
                 } else {
-                    // negative: load abs then negate
                     self.emit(&format!("@{}", -n));
                     self.emit("D=-A");
+                    self.push_d();
                 }
-                self.push_d();
             }
 
             Expr::Sizeof(ty) => {
@@ -437,9 +793,10 @@ impl Gen {
                 let info = vars.get(name).ok_or_else(|| {
                     CodegenError::new(format!("undefined variable '{}'", name))
                 })?.clone();
-                // Arrays decay to a pointer to their first element (C semantics).
                 if matches!(info.ty, crate::parser::Type::Array(..)) {
                     self.addr_of_var(&info);
+                } else if matches!(info.ty, Type::Long) {
+                    self.load_var_long(&info);
                 } else {
                     self.load_var(&info);
                 }
@@ -452,29 +809,51 @@ impl Gen {
                         self.gen_addr(inner, vars)?;
                     }
                     UnOp::Deref => {
+                        let pointee_ty = self.expr_type(inner, vars)
+                            .and_then(|t| if let Type::Ptr(e) = t { Some(*e) } else { None });
                         self.gen_expr(inner, vars)?;
-                        // pop address, read memory at that address
                         self.pop_d();
-                        self.emit("A=D");
-                        self.emit("D=M");
-                        self.push_d();
+                        if matches!(pointee_ty, Some(Type::Long)) {
+                            self.load_long_from_addr_d();
+                        } else {
+                            self.emit("A=D");
+                            self.emit("D=M");
+                            self.push_d();
+                        }
                     }
                     UnOp::Neg => {
+                        let inner_ty = self.expr_type(inner, vars).unwrap_or(Type::Int);
                         self.gen_expr(inner, vars)?;
-                        self.pop_d();
-                        self.emit("D=-D");
-                        self.push_d();
+                        if matches!(inner_ty, Type::Long) {
+                            self.pop_long_to_r56();
+                            self.call_r3_helper("__lneg");
+                            self.push_long_from_r56();
+                        } else {
+                            self.pop_d();
+                            self.emit("D=-D");
+                            self.push_d();
+                        }
                     }
                     UnOp::Not => {
+                        let inner_ty = self.expr_type(inner, vars).unwrap_or(Type::Int);
                         self.gen_expr(inner, vars)?;
-                        // !x: if x==0 push 1, else push 0
-                        self.pop_d();
+                        if matches!(inner_ty, Type::Long) {
+                            // Collapse 2 words: if hi|lo != 0, result is 0; else 1
+                            self.pop_d();
+                            self.emit("@R13");
+                            self.emit("M=D"); // R13 = lo
+                            self.pop_d();
+                            self.emit("@R13");
+                            self.emit("D=D|M"); // D = hi | lo
+                        } else {
+                            self.pop_d();
+                        }
+                        // Now D = value to test
                         let id = self.label();
                         let lfalse = format!("__not_f_{}", id);
                         let lend   = format!("__not_e_{}", id);
                         self.emit(&format!("@{}", lfalse));
                         self.emit("D;JNE");
-                        // x was 0 => result 1
                         self.emit("D=1");
                         self.emit(&format!("@{}", lend));
                         self.emit("0;JMP");
@@ -484,10 +863,25 @@ impl Gen {
                         self.push_d();
                     }
                     UnOp::BitNot => {
+                        let inner_ty = self.expr_type(inner, vars).unwrap_or(Type::Int);
                         self.gen_expr(inner, vars)?;
-                        self.pop_d();
-                        self.emit("D=!D");
-                        self.push_d();
+                        if matches!(inner_ty, Type::Long) {
+                            // Stack: [hi, lo] with lo on top
+                            self.pop_d();
+                            self.emit("D=!D");
+                            self.emit("@R14");
+                            self.emit("M=D"); // R14 = ~lo
+                            self.pop_d();
+                            self.emit("D=!D");
+                            self.push_d(); // push ~hi
+                            self.emit("@R14");
+                            self.emit("D=M");
+                            self.push_d(); // push ~lo
+                        } else {
+                            self.pop_d();
+                            self.emit("D=!D");
+                            self.push_d();
+                        }
                     }
                 }
             }
@@ -512,6 +906,10 @@ impl Gen {
                     &base_ty,
                     Some(Type::Array(e, _)) if matches!(e.as_ref(), Type::Array(_, _))
                 );
+                let elem_is_long = matches!(
+                    &base_ty,
+                    Some(Type::Array(e, _)) | Some(Type::Ptr(e)) if matches!(e.as_ref(), Type::Long)
+                );
 
                 self.gen_expr(base, vars)?;
                 self.gen_expr(idx, vars)?;
@@ -534,6 +932,8 @@ impl Gen {
 
                 if elem_is_array {
                     self.push_d();
+                } else if elem_is_long {
+                    self.load_long_from_addr_d();
                 } else {
                     self.emit("A=D");
                     self.emit("D=M");   // D = value at address
@@ -543,19 +943,35 @@ impl Gen {
 
             Expr::Member(_, _) => {
                 // Load value at field address: gen_addr gives the address, then deref
+                let field_ty = self.lvalue_type(expr, vars);
                 self.gen_addr(expr, vars)?;
                 self.pop_d();
-                self.emit("A=D");
-                self.emit("D=M");
-                self.push_d();
+                if matches!(field_ty, Some(Type::Long)) {
+                    self.load_long_from_addr_d();
+                } else {
+                    self.emit("A=D");
+                    self.emit("D=M");
+                    self.push_d();
+                }
             }
 
             Expr::Ternary(cond, then_e, else_e) => {
                 let id = self.label();
                 let l_false = format!("__tern_f_{}", id);
                 let l_end   = format!("__tern_e_{}", id);
+                // Evaluate condition - handle Long condition
+                let cond_ty = self.expr_type(cond, vars).unwrap_or(Type::Int);
                 self.gen_expr(cond, vars)?;
-                self.pop_d();
+                if matches!(cond_ty, Type::Long) {
+                    self.pop_d();
+                    self.emit("@R13");
+                    self.emit("M=D");
+                    self.pop_d();
+                    self.emit("@R13");
+                    self.emit("D=D|M");
+                } else {
+                    self.pop_d();
+                }
                 self.emit(&format!("@{}", l_false));
                 self.emit("D;JEQ");
                 self.gen_expr(then_e, vars)?;
@@ -567,40 +983,119 @@ impl Gen {
             }
 
             Expr::PostInc(inner) => {
-                self.gen_addr(inner, vars)?;
-                self.pop_d();
-                self.emit("@R13");
-                self.emit("M=D");       // R13 = address
-                self.emit("@R13");
-                self.emit("A=M");       // A = address
-                self.emit("D=M");       // D = old value
-                self.push_d();          // push old value (expression result)
-                self.emit("@R13");
-                self.emit("A=M");       // A = address
-                self.emit("M=M+1");     // increment in place
+                let inner_ty = self.lvalue_type(inner, vars);
+                if matches!(inner_ty, Some(Type::Long)) {
+                    self.gen_addr(inner, vars)?;
+                    self.pop_d();
+                    self.emit("@R15"); self.emit("M=D");    // R15 = address
+                    self.emit("A=D");  self.emit("D=M");    // D = old hi
+                    self.emit("@R5");  self.emit("M=D");    // R5 = old hi
+                    self.push_d();                           // push old hi (result)
+                    self.emit("@R15"); self.emit("A=M+1"); self.emit("D=M"); // D = old lo
+                    self.emit("@R6");  self.emit("M=D");    // R6 = old lo
+                    self.push_d();                           // push old lo (result)
+                    // compute old + 1 using __ladd: R5/R6 already set, R7=0, R8=1
+                    self.emit("@R7");  self.emit("M=0");
+                    self.emit("@R8");  self.emit("M=1");
+                    self.call_r3_helper("__ladd");           // new value in R5/R6
+                    self.emit("@R5"); self.emit("D=M");
+                    self.emit("@R15"); self.emit("A=M");  self.emit("M=D");  // mem[addr] = new hi
+                    self.emit("@R6"); self.emit("D=M");
+                    self.emit("@R15"); self.emit("A=M+1"); self.emit("M=D"); // mem[addr+1] = new lo
+                } else {
+                    self.gen_addr(inner, vars)?;
+                    self.pop_d();
+                    self.emit("@R13");
+                    self.emit("M=D");       // R13 = address
+                    self.emit("@R13");
+                    self.emit("A=M");       // A = address
+                    self.emit("D=M");       // D = old value
+                    self.push_d();          // push old value (expression result)
+                    self.emit("@R13");
+                    self.emit("A=M");       // A = address
+                    self.emit("M=M+1");     // increment in place
+                }
             }
             Expr::PostDec(inner) => {
-                self.gen_addr(inner, vars)?;
-                self.pop_d();
-                self.emit("@R13");
-                self.emit("M=D");       // R13 = address
-                self.emit("@R13");
-                self.emit("A=M");       // A = address
-                self.emit("D=M");       // D = old value
-                self.push_d();          // push old value (expression result)
-                self.emit("@R13");
-                self.emit("A=M");       // A = address
-                self.emit("M=M-1");     // decrement in place
+                let inner_ty = self.lvalue_type(inner, vars);
+                if matches!(inner_ty, Some(Type::Long)) {
+                    self.gen_addr(inner, vars)?;
+                    self.pop_d();
+                    self.emit("@R15"); self.emit("M=D");    // R15 = address
+                    self.emit("A=D");  self.emit("D=M");    // D = old hi
+                    self.emit("@R5");  self.emit("M=D");    // R5 = old hi
+                    self.push_d();                           // push old hi (result)
+                    self.emit("@R15"); self.emit("A=M+1"); self.emit("D=M"); // D = old lo
+                    self.emit("@R6");  self.emit("M=D");    // R6 = old lo
+                    self.push_d();                           // push old lo (result)
+                    // compute old - 1 using __lsub: R5/R6 already set, R7=0, R8=1
+                    self.emit("@R7");  self.emit("M=0");
+                    self.emit("@R8");  self.emit("M=1");
+                    self.call_r3_helper("__lsub");           // new value in R5/R6
+                    self.emit("@R5"); self.emit("D=M");
+                    self.emit("@R15"); self.emit("A=M");  self.emit("M=D");  // mem[addr] = new hi
+                    self.emit("@R6"); self.emit("D=M");
+                    self.emit("@R15"); self.emit("A=M+1"); self.emit("M=D"); // mem[addr+1] = new lo
+                } else {
+                    self.gen_addr(inner, vars)?;
+                    self.pop_d();
+                    self.emit("@R13");
+                    self.emit("M=D");       // R13 = address
+                    self.emit("@R13");
+                    self.emit("A=M");       // A = address
+                    self.emit("D=M");       // D = old value
+                    self.push_d();          // push old value (expression result)
+                    self.emit("@R13");
+                    self.emit("A=M");       // A = address
+                    self.emit("M=M-1");     // decrement in place
+                }
             }
             Expr::Cast(ty, inner) => {
-                self.gen_expr(inner, vars)?;
-                if matches!(ty, Type::Char) {
-                    self.pop_d();
-                    self.emit("@255");
-                    self.emit("D=D&A");
-                    self.push_d();
+                let inner_ty = self.expr_type(inner, vars).unwrap_or(Type::Int);
+                match ty {
+                    Type::Long => {
+                        if matches!(inner_ty, Type::Long) {
+                            self.gen_expr(inner, vars)?;
+                        } else {
+                            self.gen_expr(inner, vars)?;
+                            self.sign_extend_to_long();
+                        }
+                    }
+                    Type::Char => {
+                        self.gen_expr(inner, vars)?;
+                        if matches!(inner_ty, Type::Long) {
+                            // Take lo word, discard hi
+                            self.pop_d();
+                            self.emit("@R13");
+                            self.emit("M=D"); // save lo
+                            self.pop_d();     // discard hi
+                            self.emit("@R13");
+                            self.emit("D=M");
+                            self.emit("@255");
+                            self.emit("D=D&A");
+                            self.push_d();
+                        } else {
+                            self.pop_d();
+                            self.emit("@255");
+                            self.emit("D=D&A");
+                            self.push_d();
+                        }
+                    }
+                    _ => {
+                        self.gen_expr(inner, vars)?;
+                        if matches!(inner_ty, Type::Long) {
+                            // Long -> narrower: take lo word
+                            self.pop_d();     // lo (on top)
+                            self.emit("@R13");
+                            self.emit("M=D");
+                            self.pop_d();     // hi (discard)
+                            self.emit("@R13");
+                            self.emit("D=M");
+                            self.push_d();
+                        }
+                        // else no-op
+                    }
                 }
-                // All other casts: no-op
             }
             Expr::InitList(items) => {
                 if let Some(first) = items.first() {
@@ -729,6 +1224,13 @@ impl Gen {
         // Short-circuit logical OR
         if let BinOp::Or = op {
             return self.gen_or(lhs, rhs, vars);
+        }
+
+        // Check for Long binary operation
+        let lhs_ty = self.expr_type(lhs, vars).unwrap_or(Type::Int);
+        let rhs_ty = self.expr_type(rhs, vars).unwrap_or(Type::Int);
+        if matches!(lhs_ty, Type::Long) || matches!(rhs_ty, Type::Long) {
+            return self.gen_binop_long(op, lhs, rhs, vars);
         }
 
         // Evaluate both operands
@@ -865,12 +1367,10 @@ impl Gen {
                 let l_sat      = format!("__shr_sat_{}", id);
                 let l_sat_neg  = format!("__shr_sat_neg_{}", id);
                 let l_normal   = format!("__shr_normal_{}", id);
-                let l_neg_body = format!("__shr_neg_{}", id);
                 let l_pow_loop = format!("__shr_pow_{}", id);
                 let l_pow_end  = format!("__shr_pow_end_{}", id);
                 let l_end      = format!("__shr_end_{}", id);
                 let ret_lbl    = format!("__shr_div_ret_{}", id);
-                let ret_lbl2   = format!("__shr_div_ret2_{}", id);
                 self.emit("@R13");
                 self.emit("M=D");           // R13 = lhs
                 // If n >= 15: saturate (sign extension fills all bits)
@@ -918,13 +1418,7 @@ impl Gen {
                 self.emit(&format!("@{}", l_pow_loop));
                 self.emit("0;JMP");
                 self.emit(&format!("({})", l_pow_end));
-                // R13 = lhs, R14 = 2^n
-                // If lhs < 0: use (lhs - 1) / 2^n to get floor division, then subtract 1
-                self.emit("@R13");
-                self.emit("D=M");
-                self.emit(&format!("@{}", l_neg_body));
-                self.emit("D;JLT");
-                // Positive lhs: call __div normally
+                // Call __div: quotient → R13, remainder → R15
                 self.emit(&format!("@{}", ret_lbl));
                 self.emit("D=A");
                 self.emit("@R3");
@@ -932,27 +1426,14 @@ impl Gen {
                 self.emit("@__div");
                 self.emit("0;JMP");
                 self.emit(&format!("({})", ret_lbl));
+                // Floor adjustment: if remainder (R15) < 0, decrement quotient.
+                // Avoids the pre-adjustment overflow at lhs = INT16_MIN.
+                self.emit("@R15");
+                self.emit("D=M");
                 self.emit(&format!("@{}", l_end));
-                self.emit("0;JMP");
-                // Negative lhs: floor(lhs / 2^n) = (lhs - (2^n - 1)) / 2^n
-                // which equals trunc((lhs - (2^n - 1)) / 2^n)
-                // Equivalent: compute trunc(lhs / 2^n), then if lhs % 2^n != 0 subtract 1.
-                // Simpler: lhs = lhs - (2^n - 1) before dividing (adds -1 correction for negatives)
-                self.emit(&format!("({})", l_neg_body));
+                self.emit("D;JGE");         // remainder >= 0: already exact or positive
                 self.emit("@R13");
-                self.emit("D=M");           // D = lhs
-                self.emit("@R14");
-                self.emit("D=D-M");         // D = lhs - 2^n
-                self.emit("D=D+1");         // D = lhs - 2^n + 1 = lhs - (2^n - 1)
-                self.emit("@R13");
-                self.emit("M=D");           // R13 = adjusted lhs
-                self.emit(&format!("@{}", ret_lbl2));
-                self.emit("D=A");
-                self.emit("@R3");
-                self.emit("M=D");
-                self.emit("@__div");
-                self.emit("0;JMP");
-                self.emit(&format!("({})", ret_lbl2));
+                self.emit("M=M-1");         // floor correction
                 self.emit(&format!("({})", l_end));
                 self.emit("@R13");
                 self.emit("D=M");
@@ -963,6 +1444,185 @@ impl Gen {
             | BinOp::AndAssign | BinOp::OrAssign | BinOp::XorAssign
             | BinOp::ShlAssign | BinOp::ShrAssign
             | BinOp::And | BinOp::Or => unreachable!(),
+        }
+        Ok(())
+    }
+
+    fn gen_binop_long(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr, vars: &HashMap<String, VarInfo>) -> Result<(), CodegenError> {
+        self.gen_expr_as_long(lhs, vars)?;
+        self.gen_expr_as_long(rhs, vars)?;
+        // Stack: [hi_a, lo_a, hi_b, lo_b] with lo_b on top
+
+        match op {
+            BinOp::Add => {
+                self.pop_long_pair_to_r5678();
+                self.call_r3_helper("__ladd");
+                self.push_long_from_r56();
+            }
+            BinOp::Sub => {
+                self.pop_long_pair_to_r5678();
+                self.call_r3_helper("__lsub");
+                self.push_long_from_r56();
+            }
+            BinOp::Mul => {
+                self.pop_long_pair_to_r5678();
+                self.call_r3_helper("__lmul");
+                self.push_long_from_r56();
+            }
+            BinOp::Div => {
+                self.pop_long_pair_to_r5678();
+                self.call_r3_helper("__ldiv");
+                self.push_long_from_r56();
+            }
+            BinOp::Mod => {
+                self.pop_long_pair_to_r5678();
+                self.call_r3_helper("__ldiv");
+                // remainder in R9:R10
+                self.emit("@R9"); self.emit("D=M"); self.push_d();
+                self.emit("@R10"); self.emit("D=M"); self.push_d();
+            }
+            BinOp::BitAnd => {
+                self.pop_long_pair_to_r5678();
+                self.emit("@R5"); self.emit("D=M"); self.emit("@R7"); self.emit("D=D&M"); self.emit("@R5"); self.emit("M=D");
+                self.emit("@R6"); self.emit("D=M"); self.emit("@R8"); self.emit("D=D&M"); self.emit("@R6"); self.emit("M=D");
+                self.push_long_from_r56();
+            }
+            BinOp::BitOr => {
+                self.pop_long_pair_to_r5678();
+                self.emit("@R5"); self.emit("D=M"); self.emit("@R7"); self.emit("D=D|M"); self.emit("@R5"); self.emit("M=D");
+                self.emit("@R6"); self.emit("D=M"); self.emit("@R8"); self.emit("D=D|M"); self.emit("@R6"); self.emit("M=D");
+                self.push_long_from_r56();
+            }
+            BinOp::BitXor => {
+                self.pop_long_pair_to_r5678();
+                // XOR = (a|b) & ~(a&b) per word
+                // hi:
+                self.emit("@R5"); self.emit("D=M"); self.emit("@R7"); self.emit("D=D&M"); self.emit("D=!D"); self.emit("@R9"); self.emit("M=D");
+                self.emit("@R5"); self.emit("D=M"); self.emit("@R7"); self.emit("D=D|M"); self.emit("@R9"); self.emit("D=D&M"); self.emit("@R5"); self.emit("M=D");
+                // lo:
+                self.emit("@R6"); self.emit("D=M"); self.emit("@R8"); self.emit("D=D&M"); self.emit("D=!D"); self.emit("@R9"); self.emit("M=D");
+                self.emit("@R6"); self.emit("D=M"); self.emit("@R8"); self.emit("D=D|M"); self.emit("@R9"); self.emit("D=D&M"); self.emit("@R6"); self.emit("M=D");
+                self.push_long_from_r56();
+            }
+            BinOp::Eq | BinOp::Ne => {
+                self.pop_long_pair_to_r5678();
+                let id = self.label();
+                let l_nomatch = format!("__lcmp_nm_{}", id);
+                let l_end = format!("__lcmp_e_{}", id);
+                // check hi
+                self.emit("@R5"); self.emit("D=M"); self.emit("@R7"); self.emit("D=D-M");
+                self.emit(&format!("@{}", l_nomatch)); self.emit("D;JNE");
+                // check lo
+                self.emit("@R6"); self.emit("D=M"); self.emit("@R8"); self.emit("D=D-M");
+                self.emit(&format!("@{}", l_nomatch)); self.emit("D;JNE");
+                // match
+                let match_val: i32 = if matches!(op, BinOp::Eq) { 1 } else { 0 };
+                let nomatch_val: i32 = if matches!(op, BinOp::Eq) { 0 } else { 1 };
+                self.emit(&format!("D={}", match_val));
+                self.emit(&format!("@{}", l_end)); self.emit("0;JMP");
+                self.emit(&format!("({})", l_nomatch));
+                self.emit(&format!("D={}", nomatch_val));
+                self.emit(&format!("({})", l_end));
+                self.push_d();
+            }
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                self.pop_long_pair_to_r5678();
+                // For GT/GE: swap a (R5:R6) and b (R7:R8), then use LT/LE logic
+                if matches!(op, BinOp::Gt | BinOp::Ge) {
+                    self.emit("@R5"); self.emit("D=M"); self.emit("@R9"); self.emit("M=D");
+                    self.emit("@R7"); self.emit("D=M"); self.emit("@R5"); self.emit("M=D");
+                    self.emit("@R9"); self.emit("D=M"); self.emit("@R7"); self.emit("M=D");
+                    self.emit("@R6"); self.emit("D=M"); self.emit("@R9"); self.emit("M=D");
+                    self.emit("@R8"); self.emit("D=M"); self.emit("@R6"); self.emit("M=D");
+                    self.emit("@R9"); self.emit("D=M"); self.emit("@R8"); self.emit("M=D");
+                }
+                let use_le = matches!(op, BinOp::Le | BinOp::Ge);
+                let id = self.label();
+                let l_true = format!("__llt_t_{}", id);
+                let l_false = format!("__llt_f_{}", id);
+                let l_end = format!("__llt_e_{}", id);
+                let l_la_neg = format!("__llt_lan_{}", id);
+                let l_lb_neg = format!("__llt_lbn_{}", id);
+                let l_lb_neg2 = format!("__llt_lbn2_{}", id);
+                let l_ha_neg = format!("__llt_han_{}", id);
+                let l_ha_pos_b_neg = format!("__llt_hapbn_{}", id);
+                let l_ha_safe_sub = format!("__llt_hss_{}", id);
+                // Compare hi signed (overflow-safe: check signs before subtracting)
+                self.emit("@R5"); self.emit("D=M");
+                self.emit(&format!("@{}", l_ha_neg)); self.emit("D;JLT");
+                // hi_a >= 0: check hi_b sign
+                self.emit("@R7"); self.emit("D=M");
+                self.emit(&format!("@{}", l_ha_pos_b_neg)); self.emit("D;JLT");
+                // both hi >= 0: safe subtraction
+                self.emit("@R5"); self.emit("D=M"); self.emit("@R7"); self.emit("D=D-M");
+                self.emit(&format!("@{}", l_true)); self.emit("D;JLT");
+                self.emit(&format!("@{}", l_false)); self.emit("D;JGT");
+                self.emit(&format!("@{}", l_ha_safe_sub)); self.emit("0;JMP");
+                // hi_a >= 0, hi_b < 0: a > b → not Lt
+                self.emit(&format!("({})", l_ha_pos_b_neg));
+                self.emit(&format!("@{}", l_false)); self.emit("0;JMP");
+                // hi_a < 0: check hi_b sign
+                self.emit(&format!("({})", l_ha_neg));
+                self.emit("@R7"); self.emit("D=M");
+                self.emit(&format!("@{}", l_true)); self.emit("D;JGE"); // hi_a<0,hi_b>=0: a<b
+                // both hi < 0: safe subtraction
+                self.emit("@R5"); self.emit("D=M"); self.emit("@R7"); self.emit("D=D-M");
+                self.emit(&format!("@{}", l_true)); self.emit("D;JLT");
+                self.emit(&format!("@{}", l_false)); self.emit("D;JGT");
+                // hi equal (both same sign, D==0): compare lo unsigned
+                self.emit(&format!("({})", l_ha_safe_sub));
+                // hi equal: compare lo unsigned
+                self.emit("@R6"); self.emit("D=M");
+                self.emit(&format!("@{}", l_la_neg)); self.emit("D;JLT");
+                // lo_a >= 0
+                self.emit("@R8"); self.emit("D=M");
+                self.emit(&format!("@{}", l_lb_neg)); self.emit("D;JLT");
+                // both >= 0: signed comparison works
+                self.emit("@R6"); self.emit("D=M"); self.emit("@R8"); self.emit("D=D-M");
+                if use_le {
+                    self.emit(&format!("@{}", l_true)); self.emit("D;JLE");
+                } else {
+                    self.emit(&format!("@{}", l_true)); self.emit("D;JLT");
+                }
+                self.emit(&format!("@{}", l_false)); self.emit("0;JMP");
+                self.emit(&format!("({})", l_lb_neg));
+                // lo_a >= 0, lo_b < 0: unsigned lo_b >= 32768 > lo_a -> a < b
+                self.emit(&format!("@{}", l_true)); self.emit("0;JMP");
+                self.emit(&format!("({})", l_la_neg));
+                // lo_a < 0
+                self.emit("@R8"); self.emit("D=M");
+                self.emit(&format!("@{}", l_lb_neg2)); self.emit("D;JLT");
+                // lo_a < 0, lo_b >= 0: unsigned lo_a >= 32768 > lo_b -> a > b
+                self.emit(&format!("@{}", l_false)); self.emit("0;JMP");
+                self.emit(&format!("({})", l_lb_neg2));
+                // both < 0: signed comparison works
+                self.emit("@R6"); self.emit("D=M"); self.emit("@R8"); self.emit("D=D-M");
+                if use_le {
+                    self.emit(&format!("@{}", l_true)); self.emit("D;JLE");
+                } else {
+                    self.emit(&format!("@{}", l_true)); self.emit("D;JLT");
+                }
+                self.emit(&format!("({})", l_false));
+                self.emit("D=0");
+                self.emit(&format!("@{}", l_end)); self.emit("0;JMP");
+                self.emit(&format!("({})", l_true));
+                self.emit("D=1");
+                self.emit(&format!("({})", l_end));
+                self.push_d();
+            }
+            BinOp::Shl => {
+                self.pop_long_pair_to_r5678();
+                // shift count is lo word of rhs (R8); hi word (R7) ignored
+                self.call_r3_helper("__lshl");
+                self.push_long_from_r56();
+            }
+            BinOp::Shr => {
+                self.pop_long_pair_to_r5678();
+                // shift count is lo word of rhs (R8); hi word (R7) ignored
+                self.call_r3_helper("__lshr");
+                self.push_long_from_r56();
+            }
+            _ => return Err(CodegenError::new(format!("long binop {:?} not supported", op))),
         }
         Ok(())
     }
@@ -1010,12 +1670,30 @@ impl Gen {
         let id = self.label();
         let l_false = format!("__and_f_{}", id);
         let l_end   = format!("__and_e_{}", id);
+        // Evaluate lhs, collapse Long to boolean
+        let lhs_ty = self.expr_type(lhs, vars).unwrap_or(Type::Int);
         self.gen_expr(lhs, vars)?;
-        self.pop_d();
+        if matches!(lhs_ty, Type::Long) {
+            self.pop_d();
+            self.emit("@R13"); self.emit("M=D");
+            self.pop_d();
+            self.emit("@R13"); self.emit("D=D|M");
+        } else {
+            self.pop_d();
+        }
         self.emit(&format!("@{}", l_false));
         self.emit("D;JEQ");
+        // Evaluate rhs, collapse Long to boolean
+        let rhs_ty = self.expr_type(rhs, vars).unwrap_or(Type::Int);
         self.gen_expr(rhs, vars)?;
-        self.pop_d();
+        if matches!(rhs_ty, Type::Long) {
+            self.pop_d();
+            self.emit("@R13"); self.emit("M=D");
+            self.pop_d();
+            self.emit("@R13"); self.emit("D=D|M");
+        } else {
+            self.pop_d();
+        }
         self.emit(&format!("@{}", l_false));
         self.emit("D;JEQ");
         self.emit("D=1");
@@ -1032,12 +1710,28 @@ impl Gen {
         let id = self.label();
         let l_true = format!("__or_t_{}", id);
         let l_end  = format!("__or_e_{}", id);
+        let lhs_ty = self.expr_type(lhs, vars).unwrap_or(Type::Int);
         self.gen_expr(lhs, vars)?;
-        self.pop_d();
+        if matches!(lhs_ty, Type::Long) {
+            self.pop_d();
+            self.emit("@R13"); self.emit("M=D");
+            self.pop_d();
+            self.emit("@R13"); self.emit("D=D|M");
+        } else {
+            self.pop_d();
+        }
         self.emit(&format!("@{}", l_true));
         self.emit("D;JNE");
+        let rhs_ty = self.expr_type(rhs, vars).unwrap_or(Type::Int);
         self.gen_expr(rhs, vars)?;
-        self.pop_d();
+        if matches!(rhs_ty, Type::Long) {
+            self.pop_d();
+            self.emit("@R13"); self.emit("M=D");
+            self.pop_d();
+            self.emit("@R13"); self.emit("D=D|M");
+        } else {
+            self.pop_d();
+        }
         self.emit(&format!("@{}", l_true));
         self.emit("D;JNE");
         self.emit("D=0");
@@ -1110,13 +1804,124 @@ impl Gen {
         rhs: &Expr,
         vars: &HashMap<String, VarInfo>,
     ) -> Result<(), CodegenError> {
-        // 1. Evaluate rhs first (important: this must happen before we compute any addresses)
+        let lhs_ty = self.lvalue_type(lhs, vars);
+        let rhs_ty = self.expr_type(rhs, vars).unwrap_or(Type::Int);
+
+        if matches!(lhs_ty, Some(Type::Long)) {
+            // Long lhs: need 2 words
+            self.gen_expr(rhs, vars)?;
+            if !matches!(rhs_ty, Type::Long) {
+                self.sign_extend_to_long();
+            }
+            // Stack: [hi, lo] with lo on top
+            match lhs {
+                Expr::Ident(name) => {
+                    let info = vars.get(name).ok_or_else(|| {
+                        CodegenError::new(format!("undefined variable '{}'", name))
+                    })?.clone();
+                    self.pop_d();
+                    self.emit("@R14");
+                    self.emit("M=D"); // R14 = lo
+                    self.pop_d();
+                    self.emit("@R13");
+                    self.emit("M=D"); // R13 = hi
+                    self.store_var_long_r13r14(&info);
+                    // Result of assignment expression: push back hi then lo
+                    self.emit("@R13");
+                    self.emit("D=M");
+                    self.push_d();
+                    self.emit("@R14");
+                    self.emit("D=M");
+                    self.push_d();
+                }
+                _ => {
+                    // Deref/Index/Member: stash hi/lo in R5/R6, compute address, store
+                    self.pop_d();
+                    self.emit("@R6");
+                    self.emit("M=D"); // R6 = lo
+                    self.pop_d();
+                    self.emit("@R5");
+                    self.emit("M=D"); // R5 = hi
+                    match lhs {
+                        Expr::UnOp(UnOp::Deref, ptr_expr) => {
+                            self.gen_expr(ptr_expr, vars)?;
+                            self.pop_d();
+                            self.store_long_r5r6_at_addr_d();
+                        }
+                        Expr::Index(base, idx) => {
+                            let base_ty = self.expr_type(base, vars);
+                            let stride = match &base_ty {
+                                Some(Type::Array(e, _)) | Some(Type::Ptr(e)) => self.type_size(e).max(1),
+                                _ => 2,
+                            };
+                            self.gen_expr(base, vars)?;
+                            self.gen_expr(idx, vars)?;
+                            self.pop_d();
+                            if stride == 1 {
+                                self.emit("@R14");
+                                self.emit("M=D");
+                                self.pop_d();
+                                self.emit("@R14");
+                                self.emit("D=D+M");
+                            } else {
+                                self.emit_stride_mul(stride); // D = idx*stride; safe, uses R13/R14/R15
+                                self.emit("@R14");
+                                self.emit("M=D");
+                                self.pop_d();
+                                self.emit("@R14");
+                                self.emit("D=D+M");
+                            }
+                            self.store_long_r5r6_at_addr_d();
+                        }
+                        Expr::Member(base, field) => {
+                            let base_ty = self.expr_type(base, vars)
+                                .ok_or_else(|| CodegenError::new("cannot determine type for member assignment"))?;
+                            let struct_name = match &base_ty {
+                                Type::Struct(name) => name.clone(),
+                                _ => return Err(CodegenError::new(
+                                    format!("member access on non-struct type {:?}", base_ty)
+                                )),
+                            };
+                            let offset = self.field_offset(&struct_name, field)?;
+                            self.gen_addr(base, vars)?;
+                            self.pop_d();
+                            if offset > 0 {
+                                self.emit(&format!("@{}", offset));
+                                self.emit("D=D+A");
+                            }
+                            self.store_long_r5r6_at_addr_d();
+                        }
+                        _ => return Err(CodegenError::new("long assignment to this lvalue not supported")),
+                    }
+                    self.emit("@R5");
+                    self.emit("D=M");
+                    self.push_d();
+                    self.emit("@R6");
+                    self.emit("D=M");
+                    self.push_d();
+                }
+            }
+            return Ok(());
+        }
+
+        // Non-Long lhs: original code follows
+        // 1. Evaluate rhs first
         self.gen_expr(rhs, vars)?;
+        // If rhs is Long but lhs is not, take lo word
+        if matches!(rhs_ty, Type::Long) {
+            self.pop_d();     // lo (on top)
+            self.emit("@R13");
+            self.emit("M=D");
+            self.pop_d();     // hi (discard)
+            self.emit("@R13");
+            self.emit("D=M");
+            self.push_d();    // push lo as single word
+        }
         // 2. Pop value into R13
         self.pop_d();
         self.emit("@R13");
         self.emit("M=D");
-        // 3. Store R13 to lhs, computing lhs address inline (no stack push)
+        // 3. Store R13 to lhs
         match lhs {
             Expr::Ident(name) => {
                 let info = vars.get(name).ok_or_else(|| {
@@ -1125,37 +1930,34 @@ impl Gen {
                 self.store_var_from_r13(&info);
             }
             Expr::UnOp(UnOp::Deref, ptr_expr) => {
-                // compute pointer value, then store through it
                 self.gen_expr(ptr_expr, vars)?;
-                self.pop_d();          // D = pointer address
+                self.pop_d();
                 self.emit("@R14");
-                self.emit("M=D");      // R14 = target address (@R13 would overwrite A)
+                self.emit("M=D");
                 self.emit("@R13");
-                self.emit("D=M");      // D = value
+                self.emit("D=M");
                 self.emit("@R14");
-                self.emit("A=M");      // A = target address
+                self.emit("A=M");
                 self.emit("M=D");
             }
             Expr::Index(base, idx) => {
-                // address = base + idx  (use R14 for idx, R13 already has value)
                 self.gen_expr(base, vars)?;
                 self.gen_expr(idx, vars)?;
                 self.pop_d();
                 self.emit("@R14");
-                self.emit("M=D");       // R14 = idx
-                self.pop_d();           // D = base
+                self.emit("M=D");
+                self.pop_d();
                 self.emit("@R14");
-                self.emit("D=D+M");     // D = base + idx (address)
+                self.emit("D=D+M");
                 self.emit("@R14");
-                self.emit("M=D");       // R14 = address (save before @R13 overwrites A)
+                self.emit("M=D");
                 self.emit("@R13");
-                self.emit("D=M");       // D = value
+                self.emit("D=M");
                 self.emit("@R14");
-                self.emit("A=M");       // A = address
+                self.emit("A=M");
                 self.emit("M=D");
             }
             Expr::Member(base, field) => {
-                // Compute field address via gen_addr, then store R13 there
                 let base_ty = self.expr_type(base, vars)
                     .ok_or_else(|| CodegenError::new("cannot determine type for member assignment"))?;
                 let struct_name = match &base_ty {
@@ -1165,19 +1967,19 @@ impl Gen {
                     )),
                 };
                 let offset = self.field_offset(&struct_name, field)?;
-                self.gen_addr(base, vars)?; // pushes base address
-                self.pop_d();               // D = base address
+                self.gen_addr(base, vars)?;
+                self.pop_d();
                 if offset > 0 {
                     self.emit(&format!("@{}", offset));
-                    self.emit("D=D+A");     // D = field address
+                    self.emit("D=D+A");
                 }
                 self.emit("@R14");
-                self.emit("M=D");           // R14 = field address (save before @R13 overwrites A)
+                self.emit("M=D");
                 self.emit("@R13");
-                self.emit("D=M");           // D = value
+                self.emit("D=M");
                 self.emit("@R14");
-                self.emit("A=M");           // A = field address
-                self.emit("M=D");           // store
+                self.emit("A=M");
+                self.emit("M=D");
             }
             _ => return Err(CodegenError::new(format!("not a valid lvalue: {:?}", lhs))),
         }
@@ -1196,7 +1998,10 @@ impl Gen {
     ) -> Result<(), CodegenError> {
         let id = self.label();
         let ret_lbl = format!("{}$ret_{}", name, id);
-        let n_args = args.len();
+        // Compute n_args as sum of word sizes of arguments
+        let n_args: usize = args.iter()
+            .map(|a| self.type_size(&self.expr_type(a, vars).unwrap_or(Type::Int)).max(1))
+            .sum();
 
         // nand2tetris Jack VM calling convention:
         //   1. Push arguments first (in caller's frame)
@@ -1282,8 +2087,11 @@ impl Gen {
         match stmt {
             Stmt::Expr(e) => {
                 self.gen_expr(e, vars)?;
-                // discard result
-                self.pop_d();
+                let ty = self.expr_type(e, vars).unwrap_or(Type::Int);
+                let words = self.type_size(&ty).max(1);
+                for _ in 0..words {
+                    self.pop_d();
+                }
             }
             Stmt::Block(stmts) => {
                 for s in stmts {
@@ -1353,21 +2161,52 @@ impl Gen {
                             }
                         }
                     } else {
+                        let decl_ty = vars.get(name).map(|v| v.ty.clone()).unwrap_or(Type::Int);
                         self.gen_expr(init_expr, vars)?;
-                        self.pop_d();
-                        self.emit("@R13");
-                        self.emit("M=D");
-                        self.store_var_from_r13(&info);
+                        if matches!(decl_ty, Type::Long) {
+                            let expr_ty = self.expr_type(init_expr, vars).unwrap_or(Type::Int);
+                            if !matches!(expr_ty, Type::Long) {
+                                self.sign_extend_to_long();
+                            }
+                            // Stack: [hi, lo]
+                            self.pop_d(); self.emit("@R14"); self.emit("M=D"); // R14 = lo
+                            self.pop_d(); self.emit("@R13"); self.emit("M=D"); // R13 = hi
+                            self.store_var_long_r13r14(&info);
+                        } else {
+                            // If init expr is Long but var is not, take lo
+                            let expr_ty = self.expr_type(init_expr, vars).unwrap_or(Type::Int);
+                            if matches!(expr_ty, Type::Long) {
+                                self.pop_d();       // lo
+                                self.emit("@R13"); self.emit("M=D");
+                                self.pop_d();       // hi (discard)
+                                self.emit("@R13"); self.emit("D=M");
+                                self.push_d();
+                            }
+                            self.pop_d();
+                            self.emit("@R13");
+                            self.emit("M=D");
+                            self.store_var_from_r13(&info);
+                        }
                     }
                 }
             }
             Stmt::Return(expr) => {
                 if let Some(e) = expr {
                     self.gen_expr(e, vars)?;
+                    if matches!(self.current_ret_ty, Type::Long) {
+                        let e_ty = self.expr_type(e, vars).unwrap_or(Type::Int);
+                        if !matches!(e_ty, Type::Long) {
+                            self.sign_extend_to_long();
+                        }
+                    }
                 } else {
-                    // void return: push 0 as dummy
-                    self.emit("D=0");
-                    self.push_d();
+                    if matches!(self.current_ret_ty, Type::Long) {
+                        self.emit("D=0"); self.push_d(); // hi
+                        self.emit("D=0"); self.push_d(); // lo
+                    } else {
+                        self.emit("D=0");
+                        self.push_d();
+                    }
                 }
                 self.emit(&format!("@{}$return", func_name));
                 self.emit("0;JMP");
@@ -1376,8 +2215,7 @@ impl Gen {
                 let id = self.label();
                 let l_else = format!("__if_else_{}", id);
                 let l_end  = format!("__if_end_{}", id);
-                self.gen_expr(cond, vars)?;
-                self.pop_d();
+                self.gen_cond_d(cond, vars)?;
                 self.emit(&format!("@{}", if els.is_some() { &l_else } else { &l_end }));
                 self.emit("D;JEQ");
                 self.gen_stmt(then, vars, func_name)?;
@@ -1395,8 +2233,7 @@ impl Gen {
                 let l_end = format!("__while_end_{}", id);
                 self.loop_ctx.push((l_end.clone(), l_top.clone()));
                 self.emit(&format!("({})", l_top));
-                self.gen_expr(cond, vars)?;
-                self.pop_d();
+                self.gen_cond_d(cond, vars)?;
                 self.emit(&format!("@{}", l_end));
                 self.emit("D;JEQ");
                 self.gen_stmt(body, vars, func_name)?;
@@ -1416,8 +2253,7 @@ impl Gen {
                 self.loop_ctx.push((l_end.clone(), l_incr.clone()));
                 self.emit(&format!("({})", l_top));
                 if let Some(c) = cond {
-                    self.gen_expr(c, vars)?;
-                    self.pop_d();
+                    self.gen_cond_d(c, vars)?;
                     self.emit(&format!("@{}", l_end));
                     self.emit("D;JEQ");
                 }
@@ -1425,7 +2261,11 @@ impl Gen {
                 self.emit(&format!("({})", l_incr));
                 if let Some(inc) = incr {
                     self.gen_expr(inc, vars)?;
-                    self.pop_d();
+                    let inc_ty = self.expr_type(inc, vars).unwrap_or(Type::Int);
+                    let words = self.type_size(&inc_ty).max(1);
+                    for _ in 0..words {
+                        self.pop_d();
+                    }
                 }
                 self.emit(&format!("@{}", l_top));
                 self.emit("0;JMP");
@@ -1442,8 +2282,7 @@ impl Gen {
                 self.emit(&format!("({})", l_top));
                 self.gen_stmt(body, vars, func_name)?;
                 self.emit(&format!("({})", l_cond));
-                self.gen_expr(cond, vars)?;
-                self.pop_d();
+                self.gen_cond_d(cond, vars)?;
                 self.emit(&format!("@{}", l_end));
                 self.emit("D;JEQ");
                 self.emit(&format!("@{}", l_top));
@@ -1546,6 +2385,7 @@ impl Gen {
 
     fn gen_func(&mut self, f: &AnnotatedFunc) -> Result<(), CodegenError> {
         let n_locals = f.n_locals;
+        self.current_ret_ty = f.ret_ty.clone();
         self.emit(&format!("// function {} ({} locals)", f.name, n_locals));
         self.emit(&format!("({})", f.name));
 
@@ -1565,79 +2405,110 @@ impl Gen {
 
         // Implicit return 0 for functions that fall off the end without a return.
         // Explicit `return` statements jump directly to (func$return), bypassing this.
-        self.emit("D=0");
-        self.emit("@SP");
-        self.emit("A=M");
-        self.emit("M=D");
-        self.emit("@SP");
-        self.emit("M=M+1");
+        if matches!(f.ret_ty, Type::Long) {
+            self.emit("D=0"); self.push_d(); // hi
+            self.emit("D=0"); self.push_d(); // lo
+        } else {
+            self.emit("D=0");
+            self.emit("@SP");
+            self.emit("A=M");
+            self.emit("M=D");
+            self.emit("@SP");
+            self.emit("M=M+1");
+        }
 
         // Return label for early exits, followed by return sequence / trampoline
         self.emit(&format!("({}$return)", f.name));
 
         if self.use_trampolines {
-            self.emit("@__vm_return");
+            if matches!(f.ret_ty, Type::Long) {
+                self.emit("@__vm_return_long");
+                self.need_return_long_trampoline = true;
+            } else {
+                self.emit("@__vm_return");
+                self.need_return_trampoline = true;
+            }
             self.emit("0;JMP");
-            self.need_return_trampoline = true;
         } else {
-            // Jack VM return sequence
-            // FRAME(R13) = LCL
-            self.emit("@LCL");
-            self.emit("D=M");
-            self.emit("@R13");
-            self.emit("M=D");
+            if matches!(f.ret_ty, Type::Long) {
+                // Long return inline sequence
+                self.emit("@LCL"); self.emit("D=M"); self.emit("@R13"); self.emit("M=D");
+                self.emit("@5"); self.emit("A=D-A"); self.emit("D=M"); self.emit("@R14"); self.emit("M=D");
+                // pop lo -> R15
+                self.pop_d(); self.emit("@R15"); self.emit("M=D");
+                // pop hi -> ARG[0]
+                self.pop_d(); self.emit("@ARG"); self.emit("A=M"); self.emit("M=D");
+                // ARG[1] = lo
+                self.emit("@ARG"); self.emit("D=M+1"); self.emit("@R9"); self.emit("M=D");
+                self.emit("@R15"); self.emit("D=M"); self.emit("@R9"); self.emit("A=M"); self.emit("M=D");
+                // SP = ARG + 2
+                self.emit("@ARG"); self.emit("D=M+1"); self.emit("D=D+1"); self.emit("@SP"); self.emit("M=D");
+                // Restore THAT, THIS, ARG, LCL
+                self.emit("@R13"); self.emit("AM=M-1"); self.emit("D=M"); self.emit("@THAT"); self.emit("M=D");
+                self.emit("@R13"); self.emit("AM=M-1"); self.emit("D=M"); self.emit("@THIS"); self.emit("M=D");
+                self.emit("@R13"); self.emit("AM=M-1"); self.emit("D=M"); self.emit("@ARG"); self.emit("M=D");
+                self.emit("@R13"); self.emit("AM=M-1"); self.emit("D=M"); self.emit("@LCL"); self.emit("M=D");
+                self.emit("@R14"); self.emit("A=M"); self.emit("0;JMP");
+            } else {
+                // Jack VM return sequence
+                // FRAME(R13) = LCL
+                self.emit("@LCL");
+                self.emit("D=M");
+                self.emit("@R13");
+                self.emit("M=D");
 
-            // RET(R14) = *(FRAME-5)
-            self.emit("@5");
-            self.emit("A=D-A");
-            self.emit("D=M");
-            self.emit("@R14");
-            self.emit("M=D");
+                // RET(R14) = *(FRAME-5)
+                self.emit("@5");
+                self.emit("A=D-A");
+                self.emit("D=M");
+                self.emit("@R14");
+                self.emit("M=D");
 
-            // *ARG = return value (top of stack)
-            self.pop_d();
-            self.emit("@ARG");
-            self.emit("A=M");
-            self.emit("M=D");
+                // *ARG = return value (top of stack)
+                self.pop_d();
+                self.emit("@ARG");
+                self.emit("A=M");
+                self.emit("M=D");
 
-            // SP = ARG + 1
-            self.emit("@ARG");
-            self.emit("D=M+1");
-            self.emit("@SP");
-            self.emit("M=D");
+                // SP = ARG + 1
+                self.emit("@ARG");
+                self.emit("D=M+1");
+                self.emit("@SP");
+                self.emit("M=D");
 
-            // THAT = *(FRAME-1)
-            self.emit("@R13");
-            self.emit("AM=M-1");
-            self.emit("D=M");
-            self.emit("@THAT");
-            self.emit("M=D");
+                // THAT = *(FRAME-1)
+                self.emit("@R13");
+                self.emit("AM=M-1");
+                self.emit("D=M");
+                self.emit("@THAT");
+                self.emit("M=D");
 
-            // THIS = *(FRAME-2)
-            self.emit("@R13");
-            self.emit("AM=M-1");
-            self.emit("D=M");
-            self.emit("@THIS");
-            self.emit("M=D");
+                // THIS = *(FRAME-2)
+                self.emit("@R13");
+                self.emit("AM=M-1");
+                self.emit("D=M");
+                self.emit("@THIS");
+                self.emit("M=D");
 
-            // ARG = *(FRAME-3)
-            self.emit("@R13");
-            self.emit("AM=M-1");
-            self.emit("D=M");
-            self.emit("@ARG");
-            self.emit("M=D");
+                // ARG = *(FRAME-3)
+                self.emit("@R13");
+                self.emit("AM=M-1");
+                self.emit("D=M");
+                self.emit("@ARG");
+                self.emit("M=D");
 
-            // LCL = *(FRAME-4)
-            self.emit("@R13");
-            self.emit("AM=M-1");
-            self.emit("D=M");
-            self.emit("@LCL");
-            self.emit("M=D");
+                // LCL = *(FRAME-4)
+                self.emit("@R13");
+                self.emit("AM=M-1");
+                self.emit("D=M");
+                self.emit("@LCL");
+                self.emit("M=D");
 
-            // goto RET
-            self.emit("@R14");
-            self.emit("A=M");
-            self.emit("0;JMP");
+                // goto RET
+                self.emit("@R14");
+                self.emit("A=M");
+                self.emit("0;JMP");
+            }
         }
 
         Ok(())
@@ -1846,7 +2717,7 @@ fn generate_inner(sema: SemaResult, body_only: bool) -> Result<CompiledProgram, 
     }
 
     // ── Phase 2: Generate code ───────────────────────────────────────────────
-    let mut g = Gen::new(sema.string_map.clone(), sema.struct_defs.clone(), true);
+    let mut g = Gen::new(sema.string_map.clone(), sema.struct_defs.clone(), true, sema.func_return_types.clone());
 
     if !body_only {
         g.emit("// Bootstrap");
@@ -1886,6 +2757,24 @@ fn generate_inner(sema: SemaResult, body_only: bool) -> Result<CompiledProgram, 
                 if let Some(val) = init_val {
                     if *val != 0 {
                         emit_init_value(&mut g, *val as i16, &sym);
+                    }
+                }
+            }
+        }
+
+        // Initialize non-zero Long globals (both hi and lo words)
+        for (name, ty, init_val) in &sema.globals {
+            if matches!(ty, Type::Long) {
+                if let Some(val) = init_val {
+                    let val = *val as i32;
+                    let hi = ((val as u32 >> 16) & 0xFFFF) as i16;
+                    let lo = (val as u16) as i16;
+                    let sym = format!("__g_{}", name);
+                    if hi != 0 {
+                        emit_init_value(&mut g, hi, &sym);
+                    }
+                    if lo != 0 {
+                        emit_init_value(&mut g, lo, &format!("{}_1", sym));
                     }
                 }
             }
@@ -2009,6 +2898,25 @@ fn generate_inner(sema: SemaResult, body_only: bool) -> Result<CompiledProgram, 
             g.emit("@R13"); g.emit("AM=M-1"); g.emit("D=M");
             g.emit("@LCL"); g.emit("M=D");
             // goto retAddr
+            g.emit("@R14"); g.emit("A=M"); g.emit("0;JMP");
+        }
+
+        if g.need_return_long_trampoline {
+            g.emit("");
+            g.emit("// VM return-long trampoline");
+            g.emit("(__vm_return_long)");
+            g.emit("@LCL"); g.emit("D=M"); g.emit("@R13"); g.emit("M=D");
+            g.emit("@5"); g.emit("A=D-A"); g.emit("D=M"); g.emit("@R14"); g.emit("M=D");
+            g.emit("@SP"); g.emit("M=M-1"); g.emit("A=M"); g.emit("D=M"); g.emit("@R15"); g.emit("M=D");
+            g.emit("@SP"); g.emit("M=M-1"); g.emit("A=M"); g.emit("D=M");
+            g.emit("@ARG"); g.emit("A=M"); g.emit("M=D");
+            g.emit("@ARG"); g.emit("D=M+1"); g.emit("@R9"); g.emit("M=D");
+            g.emit("@R15"); g.emit("D=M"); g.emit("@R9"); g.emit("A=M"); g.emit("M=D");
+            g.emit("@ARG"); g.emit("D=M+1"); g.emit("D=D+1"); g.emit("@SP"); g.emit("M=D");
+            g.emit("@R13"); g.emit("AM=M-1"); g.emit("D=M"); g.emit("@THAT"); g.emit("M=D");
+            g.emit("@R13"); g.emit("AM=M-1"); g.emit("D=M"); g.emit("@THIS"); g.emit("M=D");
+            g.emit("@R13"); g.emit("AM=M-1"); g.emit("D=M"); g.emit("@ARG"); g.emit("M=D");
+            g.emit("@R13"); g.emit("AM=M-1"); g.emit("D=M"); g.emit("@LCL"); g.emit("M=D");
             g.emit("@R14"); g.emit("A=M"); g.emit("0;JMP");
         }
     }

@@ -29,7 +29,7 @@ pub enum Type {
     Void,
     Int,
     Char,
-    Long,  // treated as int (1 word)
+    Long,  // 32-bit (2 words)
     Ptr(Box<Type>),
     Array(Box<Type>, usize),
     Struct(String),
@@ -41,7 +41,8 @@ impl Type {
     pub fn size(&self) -> usize {
         match self {
             Type::Void => 0,
-            Type::Int | Type::Char | Type::Long => 1,
+            Type::Int | Type::Char => 1,
+            Type::Long => 2,
             Type::Ptr(_) => 1,
             Type::Array(base, n) => base.size() * n,
             Type::Struct(_) => 0,

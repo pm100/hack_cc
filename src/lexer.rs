@@ -171,7 +171,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     if hex_start == pos {
                         return Err(LexError::new(sl, sc, "expected hex digits after '0x'"));
                     }
-                    let n = i32::from_str_radix(&source[hex_start..pos], 16).map_err(|_| {
+                    let hex_end = pos;
+                    // Strip integer suffixes (u, U, l, L) — e.g. 0xFFul
+                    while pos < bytes.len() && matches!(bytes[pos], b'u' | b'U' | b'l' | b'L') {
+                        pos += 1;
+                    }
+                    let n = i32::from_str_radix(&source[hex_start..hex_end], 16).map_err(|_| {
                         LexError::new(sl, sc, "hex literal out of range")
                     })?;
                     tokens.push(Token { kind: TokenKind::Number(n), line: sl, col: sc });
@@ -181,7 +186,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 while pos < bytes.len() && bytes[pos].is_ascii_digit() {
                     pos += 1;
                 }
-                let n: i32 = source[start..pos].parse().map_err(|_| {
+                let digit_end = pos;
+                // Strip integer suffixes (u, U, l, L) — e.g. 100l, 42UL
+                while pos < bytes.len() && matches!(bytes[pos], b'u' | b'U' | b'l' | b'L') {
+                    pos += 1;
+                }
+                let n: i32 = source[start..digit_end].parse().map_err(|_| {
                     LexError::new(sl, sc, "integer literal out of range")
                 })?;
                 tokens.push(Token { kind: TokenKind::Number(n), line: sl, col: sc });
