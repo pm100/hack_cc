@@ -449,6 +449,34 @@ impl Gen {
         }
     }
 
+    /// Truncate D to signed 8-bit range [-128..127].
+    /// Masks to 8 bits and sign-extends. Uses R15 as scratch.
+    fn truncate_d_to_signed_char(&mut self) {
+        let id = self.label();
+        let l_pos = format!("__schar_p_{}", id);
+        let l_done = format!("__schar_d_{}", id);
+        // Mask to 8 bits (0..255)
+        self.emit("@255");
+        self.emit("D=D&A");
+        self.emit("@R15");
+        self.emit("M=D");           // R15 = 8-bit value
+        self.emit("@128");
+        self.emit("D=D-A");         // D = (D & 0xFF) - 128
+        self.emit(&format!("@{}", l_pos));
+        self.emit("D;JLT");         // if < 0: original was 0..127 → already correct
+        // original was 128..255 → signed char is original - 256
+        self.emit("@R15");
+        self.emit("D=M");           // restore 8-bit value
+        self.emit("@256");
+        self.emit("D=D-A");         // D = original - 256 → -128..-1
+        self.emit(&format!("@{}", l_done));
+        self.emit("0;JMP");
+        self.emit(&format!("({})", l_pos));
+        self.emit("@R15");
+        self.emit("D=M");           // restore 8-bit value (0..127)
+        self.emit(&format!("({})", l_done));
+    }
+
     /// Store hi (R13) and lo (R14) to consecutive Long variable slots
     fn store_var_long_r13r14(&mut self, info: &VarInfo) {
         match &info.storage {
@@ -1071,13 +1099,11 @@ impl Gen {
                             self.pop_d();     // discard hi
                             self.emit("@R13");
                             self.emit("D=M");
-                            self.emit("@255");
-                            self.emit("D=D&A");
+                            self.truncate_d_to_signed_char();
                             self.push_d();
                         } else {
                             self.pop_d();
-                            self.emit("@255");
-                            self.emit("D=D&A");
+                            self.truncate_d_to_signed_char();
                             self.push_d();
                         }
                     }
@@ -1917,8 +1943,11 @@ impl Gen {
             self.emit("D=M");
             self.push_d();    // push lo as single word
         }
-        // 2. Pop value into R13
+        // 2. Pop value into R13, truncate to char if needed
         self.pop_d();
+        if matches!(lhs_ty, Some(Type::Char)) {
+            self.truncate_d_to_signed_char();
+        }
         self.emit("@R13");
         self.emit("M=D");
         // 3. Store R13 to lhs
@@ -1998,9 +2027,16 @@ impl Gen {
     ) -> Result<(), CodegenError> {
         let id = self.label();
         let ret_lbl = format!("{}$ret_{}", name, id);
-        // Compute n_args as sum of word sizes of arguments
+        // Compute n_args as sum of word sizes of arguments.
+        // Arrays decay to pointer (size 1) in expression context.
         let n_args: usize = args.iter()
-            .map(|a| self.type_size(&self.expr_type(a, vars).unwrap_or(Type::Int)).max(1))
+            .map(|a| {
+                let ty = self.expr_type(a, vars).unwrap_or(Type::Int);
+                match ty {
+                    Type::Array(..) => 1,
+                    _ => self.type_size(&ty).max(1),
+                }
+            })
             .sum();
 
         // nand2tetris Jack VM calling convention:

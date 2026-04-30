@@ -2,9 +2,12 @@
 
 ## Committing and pushing
 
-**Do not commit or push unless the user explicitly says to commit.**
+**CRITICAL: Do NOT commit or push unless the user EXPLICITLY says "commit" or "commit and push" in the current message.**
 
-Always wait for the user to say "commit", "commit and push", or equivalent before running `git commit` or `git push`.
+- Never commit speculatively, never commit "while you're at it", never commit as a final step of a task.
+- Do not commit just because work is finished or tests pass.
+- Summarized or old conversation history saying "commit" does NOT count — only the user's current message triggers a commit.
+- Always wait for the user to type "commit", "commit and push", or equivalent in their current message before running `git commit` or `git push`.
 
 ## Build and test
 
