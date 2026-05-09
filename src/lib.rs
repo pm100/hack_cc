@@ -261,6 +261,19 @@ fn build_object_text(
 /// table if needed), runs the runtime symbol-scan linker, and returns the
 /// final assembled program.
 fn link_objects(texts: &[String], lib_dirs: &[PathBuf]) -> Result<CompiledProgram, Error> {
+    link_objects_for_format(texts, lib_dirs, output::OutputFormat::Asm)
+}
+
+/// Format-aware variant of [`link_objects`].
+///
+/// For `Hackem` and `Tst` output the font table is pre-loaded as static
+/// `RAM@` data so no bootstrap ASM is generated for it.  For `Asm` and
+/// `Hack` output the font init is inlined in the bootstrap.
+fn link_objects_for_format(
+    texts: &[String],
+    lib_dirs: &[PathBuf],
+    fmt: output::OutputFormat,
+) -> Result<CompiledProgram, Error> {
     // 1. Parse .data entries from all objects (file order → allocation order)
     let mut data_entries: Vec<(String, i16)> = Vec::new();
     for text in texts {
@@ -297,19 +310,57 @@ fn link_objects(texts: &[String], lib_dirs: &[PathBuf]) -> Result<CompiledProgra
     // 4. Detect font usage: __draw_char is linked in only when needed.
     let needs_font = linked.contains("(__draw_char)");
 
-    // 5. If font is needed, rebuild with font init prepended to the bootstrap.
-    let asm = if needs_font {
-        let mut full_init = gen_data_init_code(&data_entries);
-        full_init.push_str(&codegen::gen_font_init_asm());
-        let full_bootstrap = codegen::gen_bootstrap(&full_init);
-        let combined2 = format!("{}\n{}", full_bootstrap, combined_bodies);
-        linker::link(&combined2, lib_dirs)
+    // 5. Handle font based on output format.
+    //    Hackem/Tst: put font in RAM@ data sections (no bootstrap ASM).
+    //    Asm/Hack:   inline font init in bootstrap ASM.
+    let (asm, font_data) = if needs_font {
+        match fmt {
+            output::OutputFormat::Hackem | output::OutputFormat::Tst => {
+                (linked, codegen::gen_font_data_inits())
+            }
+            _ => {
+                let mut full_init = gen_data_init_code(&data_entries);
+                full_init.push_str(&codegen::gen_font_init_asm());
+                let full_bootstrap = codegen::gen_bootstrap(&full_init);
+                let combined2 = format!("{}\n{}", full_bootstrap, combined_bodies);
+                (linker::link(&combined2, lib_dirs), Vec::new())
+            }
+        }
     } else {
-        linked
+        (linked, Vec::new())
     };
 
-    Ok(CompiledProgram { asm, data: Vec::new() })
+    Ok(CompiledProgram { asm, data: font_data })
 }
+
+/// Compile one or more C source files to a linked `CompiledProgram`, using
+/// the same two-step (compile-to-object then link) path as `hack_cc -c` +
+/// `hack_ld`.  The `fmt` parameter controls font-table handling so that
+/// `Hackem`/`Tst` output never embeds font init code in the bootstrap ROM.
+pub fn compile_and_link(
+    files: &[(&str, Option<&std::path::Path>)],
+    opts: &CompileOptions,
+    fmt: output::OutputFormat,
+) -> Result<CompiledProgram, Error> {
+    let mut objects: Vec<String> = Vec::new();
+    for (source, base_dir) in files {
+        let expanded = preprocessor::preprocess_with_predefined(source, *base_dir, &opts.include_dirs, &opts.defines)?;
+        let tokens = lexer::lex(&expanded)?;
+        let program = parser::parse(tokens)?;
+        let provides: Vec<String> = program.funcs.iter()
+            .filter(|f| !f.is_decl && !f.is_static)
+            .map(|f| f.name.clone())
+            .collect();
+        let sema_result = sema::analyze(program)?;
+        let string_literals = sema_result.string_literals.clone();
+        let globals_info = sema_result.globals.clone();
+        let struct_defs = sema_result.struct_defs.clone();
+        let compiled = codegen::generate_body_only(sema_result)?;
+        objects.push(build_object_text(&provides, &string_literals, &globals_info, &struct_defs, &compiled));
+    }
+    link_objects_for_format(&objects, &opts.lib_dirs, fmt)
+}
+
 
 /// Convert symbolic name-value pairs into Hack assembly init instructions.
 fn gen_data_init_code(entries: &[(String, i16)]) -> String {

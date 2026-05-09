@@ -139,14 +139,11 @@ fn main() {
         lib_dirs,
     };
 
-    let prog = if sources.len() == 1 {
-        let (src, path) = &sources[0];
-        hack_cc::compile_with_full_options(src, path.parent(), &opts)
-    } else {
+    let prog = {
         let file_refs: Vec<(&str, Option<&std::path::Path>)> = sources.iter()
             .map(|(src, path)| (src.as_str(), path.parent()))
             .collect();
-        hack_cc::compile_files_with_full_options(&file_refs, &opts)
+        hack_cc::compile_and_link(&file_refs, &opts, fmt)
     }.unwrap_or_else(|e| {
         eprintln!("compile error: {}", e);
         std::process::exit(1);
