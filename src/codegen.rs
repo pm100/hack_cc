@@ -141,10 +141,10 @@ pub struct DataInit {
 
 /// Full result of code generation returned by [`generate`].
 pub struct CompiledProgram {
-    /// Hack assembly text with bootstrap code (including data initialization).
+    /// Hack assembly text with bootstrap code.
     pub asm: String,
-    /// RAM data initialisations for the font table only (globals/strings are
-    /// initialized inline in the bootstrap code).
+    /// RAM data initialisations for pre-loaded data (font table for Asm/Hack;
+    /// string literals, globals, and font table for Hackem/Tst formats).
     pub data: Vec<DataInit>,
 }
 

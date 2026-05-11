@@ -6,6 +6,7 @@ pub mod codegen;
 pub mod assembler;
 pub mod output;
 pub mod linker;
+pub mod mapfile;
 
 pub use codegen::{FONT_BASE, DataInit, CompiledProgram};
 
@@ -299,23 +300,43 @@ fn link_objects_for_format(
 
     // 3. Run the runtime linker on bootstrap+bodies so that symbols referenced
     //    by the bootstrap (e.g. @__vm_call) are included in symbol discovery.
-    //    Programs with no explicit function calls only reference @__vm_return in
-    //    their bodies; without the bootstrap in scope, @__vm_call would be missed
-    //    and allocated as a RAM variable instead of resolving to the trampoline.
     //    SP is set above all data entries + a margin for runtime scratch variables.
     let sp_base = std::cmp::max(256u32, 16 + data_entries.len() as u32 + 64) as u16;
-    let init_code = gen_data_init_code(&data_entries);
+
+    // For Hackem/Tst: just reserve RAM slots (no store instructions) — values
+    // come from RAM@ sections.  For Asm/Hack: emit full init code inline.
+    let use_ram_sections = matches!(fmt,
+        output::OutputFormat::Hackem | output::OutputFormat::Tst);
+    let init_code = if use_ram_sections {
+        gen_data_addr_reservations(&data_entries)
+    } else {
+        gen_data_init_code(&data_entries)
+    };
     let bootstrap = codegen::gen_bootstrap(&init_code, sp_base);
     let combined = format!("{}\n{}", bootstrap, combined_bodies);
     let linked = linker::link(&combined, lib_dirs);
+
+    // Pre-computed DataInits for string literals and globals (Hackem/Tst only).
+    // Addresses are deterministic: entry[i] → RAM[16 + i] (assembler allocates
+    // in first-encounter order, matching the @name reservation stubs above).
+    let string_global_data: Vec<codegen::DataInit> = if use_ram_sections {
+        data_entries.iter().enumerate()
+            .map(|(i, (_, val))| codegen::DataInit {
+                address: 16 + i as u16,
+                value: *val,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // 4. Detect font usage: __draw_char is linked in only when needed.
     let needs_font = linked.contains("(__draw_char)");
 
     // 5. Handle font based on output format.
-    //    Hackem/Tst: put font in RAM@ data sections (no bootstrap ASM).
+    //    Hackem/Tst: font in RAM@ sections (no bootstrap ASM).
     //    Asm/Hack:   inline font init in bootstrap ASM.
-    let (asm, font_data) = if needs_font {
+    let (asm, mut all_data) = if needs_font {
         match fmt {
             output::OutputFormat::Hackem | output::OutputFormat::Tst => {
                 (linked, codegen::gen_font_data_inits())
@@ -332,7 +353,12 @@ fn link_objects_for_format(
         (linked, Vec::new())
     };
 
-    Ok(CompiledProgram { asm, data: font_data })
+    // Merge string/global data ahead of font data (address order is maintained
+    // by emit_ram_sections which sorts before writing).
+    let mut data = string_global_data;
+    data.append(&mut all_data);
+
+    Ok(CompiledProgram { asm, data })
 }
 
 /// Compile one or more C source files to a linked `CompiledProgram`, using
@@ -365,6 +391,13 @@ pub fn compile_and_link(
 
 
 /// Convert symbolic name-value pairs into Hack assembly init instructions.
+/// For `Hackem`/`Tst` formats: emit just `@name` per entry so the assembler
+/// allocates RAM slots in the correct order, but no store instructions —
+/// values will be pre-loaded via `RAM@` sections instead.
+fn gen_data_addr_reservations(entries: &[(String, i16)]) -> String {
+    entries.iter().map(|(name, _)| format!("@{}\n", name)).collect()
+}
+
 fn gen_data_init_code(entries: &[(String, i16)]) -> String {
     let mut out = String::new();
     for (name, val) in entries {

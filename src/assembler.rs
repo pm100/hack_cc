@@ -4,7 +4,7 @@
 ///   A-instruction: 0vvv_vvvv_vvvv_vvvv  (15-bit value, MSB = 0)
 ///   C-instruction: 111a_cccc_ccdd_djjj   (MSB = 1)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -15,34 +15,47 @@ impl AssembleError {
     fn new(msg: impl Into<String>) -> Self { Self(msg.into()) }
 }
 
-/// Assemble Hack assembly source text into a vector of 16-bit machine words.
-/// Named variables are allocated starting at `var_base` (typically 16 for standalone
-/// assembly, but must be set above C static data when assembling compiler output).
-pub fn assemble_with_base(asm: &str, var_base: u16) -> Result<Vec<u16>, AssembleError> {
-    // Predefined symbols
+/// Full assembler output, including symbol tables for map-file generation.
+pub struct AssemblerResult {
+    /// Assembled machine words.
+    pub words: Vec<u16>,
+    /// ROM labels `(name, address)` sorted by ROM address.
+    pub rom_labels: Vec<(String, u16)>,
+    /// RAM variables allocated during assembly `(name, address)` sorted by address.
+    /// Excludes pre-defined symbols (SP, R0–R15, SCREEN, KBD).
+    pub ram_vars: Vec<(String, u16)>,
+}
+
+/// Assemble and also return the full symbol table for map-file generation.
+pub fn assemble_with_symbols(asm: &str, var_base: u16) -> Result<AssemblerResult, AssembleError> {
+    const PREDEFINED: &[&str] = &[
+        "SP","LCL","ARG","THIS","THAT","SCREEN","KBD",
+        "R0","R1","R2","R3","R4","R5","R6","R7",
+        "R8","R9","R10","R11","R12","R13","R14","R15",
+    ];
+    let predefined_set: HashSet<&str> = PREDEFINED.iter().copied().collect();
+
     let mut symbols: HashMap<String, u16> = HashMap::new();
     symbols.insert("SP".into(), 0);
     symbols.insert("LCL".into(), 1);
     symbols.insert("ARG".into(), 2);
     symbols.insert("THIS".into(), 3);
     symbols.insert("THAT".into(), 4);
-    for i in 0u16..=15 {
-        symbols.insert(format!("R{}", i), i);
-    }
+    for i in 0u16..=15 { symbols.insert(format!("R{}", i), i); }
     symbols.insert("SCREEN".into(), 16384);
     symbols.insert("KBD".into(), 24576);
 
-    // Collect lines, stripping comments and blank lines
     let lines: Vec<&str> = asm.lines().collect();
 
-    // Pass 1: collect label addresses
+    // Pass 1: collect label → ROM address
     let mut rom_addr: u16 = 0;
+    let mut label_set: HashSet<String> = HashSet::new();
     for line in &lines {
         let line = strip_comment(line).trim();
-        if line.is_empty() { continue; }
-        if line.starts_with('.') { continue; } // assembler directives (no instruction)
+        if line.is_empty() || line.starts_with('.') { continue; }
         if let Some(label) = line.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
             symbols.insert(label.to_string(), rom_addr);
+            label_set.insert(label.to_string());
         } else {
             rom_addr = rom_addr.checked_add(1).ok_or_else(|| {
                 AssembleError::new("program too large for Hack 32K ROM")
@@ -50,39 +63,52 @@ pub fn assemble_with_base(asm: &str, var_base: u16) -> Result<Vec<u16>, Assemble
         }
     }
 
-    // Pass 2: emit machine words
+    // Pass 2: emit machine words; track newly-allocated RAM variables
     let mut code: Vec<u16> = Vec::with_capacity(rom_addr as usize);
-    let mut var_addr: u16 = var_base; // unresolved symbols allocated here
+    let mut var_addr: u16 = var_base;
+    let mut ram_vars: Vec<(String, u16)> = Vec::new();
 
     for line in &lines {
         let line = strip_comment(line).trim();
-        if line.is_empty() { continue; }
-        if line.starts_with('.') { continue; } // assembler directives (no instruction)
-        if line.starts_with('(') { continue; } // label definition, not an instruction
+        if line.is_empty() || line.starts_with('.') || line.starts_with('(') { continue; }
 
         let word = if let Some(sym) = line.strip_prefix('@') {
-            // A-instruction
             let value: u16 = if let Ok(n) = sym.parse::<u16>() {
                 n
             } else if let Some(&addr) = symbols.get(sym) {
                 addr
             } else {
-                // Allocate new variable in RAM
                 let addr = var_addr;
                 symbols.insert(sym.to_string(), addr);
+                // Only record as a RAM variable if it's not a pre-defined register
+                if !predefined_set.contains(sym) {
+                    ram_vars.push((sym.to_string(), addr));
+                }
                 var_addr += 1;
                 addr
             };
-            value & 0x7FFF // ensure MSB = 0
+            value & 0x7FFF
         } else {
-            // C-instruction
             parse_c_instruction(line)?
         };
-
         code.push(word);
     }
 
-    Ok(code)
+    let mut rom_labels: Vec<(String, u16)> = label_set
+        .into_iter()
+        .map(|name| { let addr = *symbols.get(&name).unwrap(); (name, addr) })
+        .collect();
+    rom_labels.sort_by_key(|&(_, addr)| addr);
+    ram_vars.sort_by_key(|&(_, addr)| addr);
+
+    Ok(AssemblerResult { words: code, rom_labels, ram_vars })
+}
+
+/// Assemble Hack assembly source text into a vector of 16-bit machine words.
+/// Named variables are allocated starting at `var_base` (typically 16 for standalone
+/// assembly, but must be set above C static data when assembling compiler output).
+pub fn assemble_with_base(asm: &str, var_base: u16) -> Result<Vec<u16>, AssembleError> {
+    assemble_with_symbols(asm, var_base).map(|r| r.words)
 }
 
 /// Assemble Hack assembly source with the standard variable base of 16.

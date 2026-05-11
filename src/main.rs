@@ -43,6 +43,10 @@ struct Cli {
     /// Use -D HACK_OUTPUT_SCREEN to select screen-buffer output.
     #[arg(short = 'D', value_name = "NAME[=VALUE]")]
     defines: Vec<String>,
+    /// Write a map file (memory layout report) alongside the output.
+    /// The map file uses the same base name as the output with a .map extension.
+    #[arg(long = "map", short = 'm')]
+    map: bool,
 }
 
 fn main() {
@@ -176,5 +180,15 @@ fn main() {
             std::process::exit(1);
         });
         println!("wrote {:?} and {:?}", out_path, hack_path);
+    }
+
+    if cli.map {
+        let map_text = hack_cc::mapfile::generate_map(&prog.asm);
+        let map_path = out_path.with_extension("map");
+        std::fs::write(&map_path, &map_text).unwrap_or_else(|e| {
+            eprintln!("error writing map {:?}: {}", map_path, e);
+            std::process::exit(1);
+        });
+        eprintln!("wrote map {:?}", map_path);
     }
 }

@@ -1,5 +1,5 @@
 .provides puts
-// DEPS: __puts
+// DEPS: __puts, __vm_return
 // VM-convention wrapper: puts(s) -> print null-terminated string + newline, return 0
 (puts)
 // ARG[0] = s -> R13
@@ -23,47 +23,6 @@ A=M
 M=D
 @SP
 M=M+1
-// VM return sequence
-@LCL
-D=M
-@R13
-M=D
-@5
-A=D-A
-D=M
-@R14
-M=D
-@SP
-M=M-1
-A=M
-D=M
-@ARG
-A=M
-M=D
-@ARG
-D=M+1
-@SP
-M=D
-@R13
-AM=M-1
-D=M
-@THAT
-M=D
-@R13
-AM=M-1
-D=M
-@THIS
-M=D
-@R13
-AM=M-1
-D=M
-@ARG
-M=D
-@R13
-AM=M-1
-D=M
-@LCL
-M=D
-@R14
-A=M
+// VM return
+@__vm_return
 0;JMP

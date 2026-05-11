@@ -51,6 +51,10 @@ struct Cli {
     /// Output format (inferred from -o extension if not specified)
     #[arg(short, long, value_enum)]
     format: Option<Format>,
+    /// Write a map file (memory layout report) alongside the output.
+    /// The map file uses the same base name as the output with a .map extension.
+    #[arg(long = "map", short = 'm')]
+    map: bool,
 }
 
 /// Metadata parsed from the leading directive lines of a `.s` object file.
@@ -139,9 +143,18 @@ fn main() {
         }
     }
 
-    // ── Step 3: Build combined ASM with bootstrap containing init code ───────
-    let init_code = gen_init_code(&combined_data);
+    // ── Step 3: Build combined ASM with bootstrap ───────────────────────────
     let sp_base = std::cmp::max(256u32, 16 + combined_data.len() as u32 + 64) as u16;
+
+    let use_ram_sections = matches!(fmt_enum, Format::Hackem | Format::Tst);
+
+    // For Hackem/Tst: just `@name` stubs (values go in RAM@ sections).
+    // For Asm/Hack: full store-init code inline.
+    let init_code = if use_ram_sections {
+        combined_data.iter().map(|(name, _)| format!("@{}\n", name)).collect::<String>()
+    } else {
+        gen_init_code(&combined_data)
+    };
 
     let build_combined = |extra_init: &str| -> String {
         let full_init = if extra_init.is_empty() {
@@ -158,21 +171,25 @@ fn main() {
         combined
     };
 
+    // Pre-computed DataInits for string literals and globals (Hackem/Tst only).
+    let string_global_data: Vec<DataInit> = if use_ram_sections {
+        combined_data.iter().enumerate()
+            .map(|(i, (_, val))| DataInit { address: 16 + i as u16, value: *val })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // ── Step 4: Runtime symbol-scan linker ──────────────────────────────────
-    // First pass: link without font init to discover which library modules are needed.
     let first_pass = link(&build_combined(""), &lib_dirs);
     let needs_font = first_pass.contains("(__draw_char)");
 
-    // For hackem/tst output the font table is pre-loaded as static RAM@ data
-    // (no bootstrap ASM needed).  For asm/hack output it must be inlined.
-    let (linked_asm, font_data): (String, Vec<DataInit>) = if needs_font {
+    let (linked_asm, mut font_data): (String, Vec<DataInit>) = if needs_font {
         match fmt_enum {
             Format::Hackem | Format::Tst => {
-                // Font goes into RAM@ sections — no inline init ASM required.
                 (first_pass, gen_font_data_inits())
             }
             _ => {
-                // Font init as bootstrap ASM for formats without a RAM@ section.
                 (link(&build_combined(&gen_font_init_asm()), &lib_dirs), Vec::new())
             }
         }
@@ -180,8 +197,11 @@ fn main() {
         (first_pass, Vec::new())
     };
 
+    let mut all_data = string_global_data;
+    all_data.append(&mut font_data);
+
     // ── Step 5: Wrap into CompiledProgram and emit ───────────────────────────
-    let prog = CompiledProgram { asm: linked_asm, data: font_data };
+    let prog = CompiledProgram { asm: linked_asm, data: all_data };
 
     let fmt = match fmt_enum {
         Format::Asm    => OutputFormat::Asm,
@@ -219,5 +239,15 @@ fn main() {
         println!("wrote {:?} and {:?}", out_path, hack_path);
     } else {
         eprintln!("wrote {:?}", out_path);
+    }
+
+    if cli.map {
+        let map_text = hack_cc::mapfile::generate_map(&prog.asm);
+        let map_path = out_path.with_extension("map");
+        std::fs::write(&map_path, &map_text).unwrap_or_else(|e| {
+            eprintln!("error writing map {:?}: {}", map_path, e);
+            std::process::exit(1);
+        });
+        eprintln!("wrote map {:?}", map_path);
     }
 }
