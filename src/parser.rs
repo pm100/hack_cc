@@ -75,6 +75,7 @@ pub enum Expr {
     Call(String, Vec<Expr>),
     Index(Box<Expr>, Box<Expr>),
     Sizeof(Type),
+    SizeofExpr(Box<Expr>), // sizeof(variable_or_expr)
     Member(Box<Expr>, String), // expr.field (also used for expr->field after desugaring)
     Ternary(Box<Expr>, Box<Expr>, Box<Expr>), // cond ? then : else
     Cast(Type, Box<Expr>),
@@ -312,9 +313,14 @@ impl Parser {
         let name = self.expect_ident()?;
         let mut dims = Vec::new();
         while self.eat(&TokenKind::LBracket) {
-            let n = self.parse_const_int()?;
+            // Allow empty [] for unsized arrays (e.g. `char arr[] = "hello"`)
+            let n = if *self.peek() == TokenKind::RBracket {
+                0 // size to be inferred from initializer
+            } else {
+                self.parse_const_int()? as usize
+            };
             self.expect(&TokenKind::RBracket)?;
-            dims.push(n as usize);
+            dims.push(n);
         }
         for &dim in dims.iter().rev() {
             ty = Type::Array(Box::new(ty), dim);
@@ -887,9 +893,17 @@ impl Parser {
         }
         if self.eat(&TokenKind::KwSizeof) {
             self.expect(&TokenKind::LParen)?;
-            let ty = self.parse_type()?;
-            self.expect(&TokenKind::RParen)?;
-            return Ok(Expr::Sizeof(ty));
+            // If the token inside parens looks like a type keyword or typedef, parse as
+            // sizeof(type). Otherwise parse as sizeof(expr) — e.g. sizeof(variable).
+            if self.is_type_start() {
+                let ty = self.parse_type()?;
+                self.expect(&TokenKind::RParen)?;
+                return Ok(Expr::Sizeof(ty));
+            } else {
+                let e = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                return Ok(Expr::SizeofExpr(Box::new(e)));
+            }
         }
         // prefix ++/-- (lower priority, treat as +=1)
         if self.eat(&TokenKind::PlusPlus) {

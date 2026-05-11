@@ -141,6 +141,7 @@ fn main() {
 
     // ── Step 3: Build combined ASM with bootstrap containing init code ───────
     let init_code = gen_init_code(&combined_data);
+    let sp_base = std::cmp::max(256u32, 16 + combined_data.len() as u32 + 64) as u16;
 
     let build_combined = |extra_init: &str| -> String {
         let full_init = if extra_init.is_empty() {
@@ -148,7 +149,7 @@ fn main() {
         } else {
             format!("{}\n{}", extra_init, init_code)
         };
-        let bootstrap = gen_bootstrap(&full_init);
+        let bootstrap = gen_bootstrap(&full_init, sp_base);
         let mut combined = bootstrap;
         for sf in &parsed {
             combined.push('\n');

@@ -7,28 +7,35 @@
  * Compile: hack_cc -I include -f hackem demo/input.c -o demo/input.hackem
  * Run:     hackem demo/input.hackem
  */
-//#define HACK_OUTPUT_SCREEN
+#define HACK_OUTPUT_SCREEN
 #include <hack.h>
 
-int main() {
+int main()
+{
     int ch;
 
     puts("Type something! (Q to quit)");
     puts("");
 
-    while (1) {
+    while (1)
+    {
         ch = getchar();
 
         if (ch == 'Q')
             break;
 
-        if (ch == 129) {
+        if (ch == 129)
+        {
             /* Backspace (Hack keycode 129) */
             putchar(8);
-        } else if (ch == 128) {
+        }
+        else if (ch == 128)
+        {
             /* Enter (Hack keycode 128) -> newline */
             putchar(10);
-        } else {
+        }
+        else
+        {
             putchar(ch);
         }
     }

@@ -77,7 +77,10 @@ pub fn link(user_asm: &str, lib_dirs: &[PathBuf]) -> String {
         let referenced = collect_referenced(&combined);
         let mut to_append: Vec<Arc<String>> = Vec::new();
 
-        for sym in &referenced {
+        // Sort symbols so library modules are appended in a deterministic order.
+        let mut sorted_refs: Vec<&String> = referenced.iter().collect();
+        sorted_refs.sort();
+        for sym in sorted_refs {
             if defined.contains(sym) || included.contains(sym) {
                 continue;
             }

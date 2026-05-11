@@ -302,8 +302,10 @@ fn link_objects_for_format(
     //    Programs with no explicit function calls only reference @__vm_return in
     //    their bodies; without the bootstrap in scope, @__vm_call would be missed
     //    and allocated as a RAM variable instead of resolving to the trampoline.
+    //    SP is set above all data entries + a margin for runtime scratch variables.
+    let sp_base = std::cmp::max(256u32, 16 + data_entries.len() as u32 + 64) as u16;
     let init_code = gen_data_init_code(&data_entries);
-    let bootstrap = codegen::gen_bootstrap(&init_code);
+    let bootstrap = codegen::gen_bootstrap(&init_code, sp_base);
     let combined = format!("{}\n{}", bootstrap, combined_bodies);
     let linked = linker::link(&combined, lib_dirs);
 
@@ -321,7 +323,7 @@ fn link_objects_for_format(
             _ => {
                 let mut full_init = gen_data_init_code(&data_entries);
                 full_init.push_str(&codegen::gen_font_init_asm());
-                let full_bootstrap = codegen::gen_bootstrap(&full_init);
+                let full_bootstrap = codegen::gen_bootstrap(&full_init, sp_base);
                 let combined2 = format!("{}\n{}", full_bootstrap, combined_bodies);
                 (linker::link(&combined2, lib_dirs), Vec::new())
             }

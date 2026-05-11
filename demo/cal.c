@@ -9,9 +9,8 @@
  *
  * Key codes: digits are ASCII, Enter=128, Backspace=129.
  */
-//#define HACK_OUTPUT_SCREEN
+#define HACK_OUTPUT_SCREEN
 #include <hack.h>
-
 
 /* Calendar grid: 6 rows x 24 cols for one month */
 char string[144];
@@ -20,12 +19,14 @@ char string[144];
 /* Output helpers                                                       */
 /* ------------------------------------------------------------------ */
 
-void print_str(char *s) {
+void print_str(char *s)
+{
     while (*s)
         putchar(*s++);
 }
 
-void print_int(int n) {
+void print_int(int n)
+{
     char buf[8];
     itoa(n, buf);
     print_str(buf);
@@ -35,19 +36,32 @@ void print_int(int n) {
 /* Month name                                                           */
 /* ------------------------------------------------------------------ */
 
-char *month_name(int m) {
-    if (m == 1)  return "January";
-    if (m == 2)  return "February";
-    if (m == 3)  return "March";
-    if (m == 4)  return "April";
-    if (m == 5)  return "May";
-    if (m == 6)  return "June";
-    if (m == 7)  return "July";
-    if (m == 8)  return "August";
-    if (m == 9)  return "September";
-    if (m == 10) return "October";
-    if (m == 11) return "November";
-    if (m == 12) return "December";
+char *month_name(int m)
+{
+    if (m == 1)
+        return "January";
+    if (m == 2)
+        return "February";
+    if (m == 3)
+        return "March";
+    if (m == 4)
+        return "April";
+    if (m == 5)
+        return "May";
+    if (m == 6)
+        return "June";
+    if (m == 7)
+        return "July";
+    if (m == 8)
+        return "August";
+    if (m == 9)
+        return "September";
+    if (m == 10)
+        return "October";
+    if (m == 11)
+        return "November";
+    if (m == 12)
+        return "December";
     return "???";
 }
 
@@ -57,8 +71,9 @@ char *month_name(int m) {
 /* deletes last digit.  Returns -1 if no digits were entered.          */
 /* ------------------------------------------------------------------ */
 
-int readint(void) {
-    int digits[6];   /* up to 5 digits + sentinel */
+int readint(void)
+{
+    int digits[6]; /* up to 5 digits + sentinel */
     int count;
     int c;
     int i;
@@ -66,29 +81,35 @@ int readint(void) {
 
     count = 0;
 
-    while (1) {
+    while (1)
+    {
         c = getchar();
 
-        if (c == 128) {          /* Enter */
+        if (c == 128)
+        { /* Enter */
             putchar(10);
             break;
         }
 
-        if (c == 129) {          /* Backspace */
-            if (count > 0) {
+        if (c == 129)
+        { /* Backspace */
+            if (count > 0)
+            {
                 count--;
-                putchar(8);      /* BS */
+                putchar(8); /* BS */
                 putchar(' ');
-                putchar(8);      /* move cursor back */
+                putchar(8); /* move cursor back */
             }
             continue;
         }
 
-        if (c >= '0' && c <= '9') {
-            if (count < 5) {
+        if (c >= '0' && c <= '9')
+        {
+            if (count < 5)
+            {
                 digits[count] = c - '0';
                 count++;
-                putchar(c);      /* echo */
+                putchar(c); /* echo */
             }
             continue;
         }
@@ -109,25 +130,28 @@ int readint(void) {
 /* pstr: convert NUL bytes to spaces, trim trailing spaces, print line */
 /* ------------------------------------------------------------------ */
 
-void pstr(char *str, int n) {
+void pstr(char *str, int n)
+{
     int i;
     int last;
 
     /* Convert NUL -> space */
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n; i++)
+    {
         if (str[i] == 0)
             str[i] = ' ';
     }
 
     /* Find last non-space */
     last = 0;
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n; i++)
+    {
         if (str[i] != ' ')
             last = i + 1;
     }
     str[last] = 0;
 
-    puts(str);   /* puts adds newline */
+    puts(str); /* puts adds newline */
 }
 
 /* ------------------------------------------------------------------ */
@@ -135,14 +159,16 @@ void pstr(char *str, int n) {
 /* 0=Sunday.  Handles Gregorian calendar + 1752 British switchover.    */
 /* ------------------------------------------------------------------ */
 
-int jan1(int yr) {
+int jan1(int yr)
+{
     int y;
     int d;
 
     y = yr;
     d = 4 + y + (y + 3) / 4;
 
-    if (y > 1800) {
+    if (y > 1800)
+    {
         d = d - (y - 1701) / 100;
         d = d + (y - 1601) / 400;
     }
@@ -157,22 +183,23 @@ int jan1(int yr) {
 /* Each day slot is 3 chars: [tens-or-space][units][space].            */
 /* ------------------------------------------------------------------ */
 
-void cal(int m, int y, char *p, int w) {
+void cal(int m, int y, char *p, int w)
+{
     int mon[13];
     int d;
     int i;
     char *s;
 
-    mon[0]  = 0;
-    mon[1]  = 31;
-    mon[2]  = 29;
-    mon[3]  = 31;
-    mon[4]  = 30;
-    mon[5]  = 31;
-    mon[6]  = 30;
-    mon[7]  = 31;
-    mon[8]  = 31;
-    mon[9]  = 30;
+    mon[0] = 0;
+    mon[1] = 31;
+    mon[2] = 29;
+    mon[3] = 31;
+    mon[4] = 30;
+    mon[5] = 31;
+    mon[6] = 30;
+    mon[7] = 31;
+    mon[8] = 31;
+    mon[9] = 30;
     mon[10] = 31;
     mon[11] = 30;
     mon[12] = 31;
@@ -181,13 +208,14 @@ void cal(int m, int y, char *p, int w) {
     d = jan1(y);
 
     /* Determine leap year / 1752 exception */
-    switch ((jan1(y + 1) + 7 - d) % 7) {
-    case 1:            /* non-leap year */
+    switch ((jan1(y + 1) + 7 - d) % 7)
+    {
+    case 1: /* non-leap year */
         mon[2] = 28;
         break;
-    case 2:            /* leap year */
+    case 2: /* leap year */
         break;
-    default:           /* 1752: September had 11 days removed */
+    default: /* 1752: September had 11 days removed */
         mon[9] = 19;
         break;
     }
@@ -200,9 +228,11 @@ void cal(int m, int y, char *p, int w) {
     /* Position s at the correct starting column */
     s = s + 3 * d;
 
-    for (i = 1; i <= mon[m]; i++) {
+    for (i = 1; i <= mon[m]; i++)
+    {
         /* 1752 Sep: skip days 3-13 (removed by Gregorian switch) */
-        if (i == 3 && mon[m] == 19) {
+        if (i == 3 && mon[m] == 19)
+        {
             i = i + 11;
             mon[m] = mon[m] + 11;
         }
@@ -216,7 +246,8 @@ void cal(int m, int y, char *p, int w) {
         *s = ' ';
         s++;
 
-        if (++d == 7) {
+        if (++d == 7)
+        {
             d = 0;
             s = p + w;
             p = s;
@@ -228,7 +259,8 @@ void cal(int m, int y, char *p, int w) {
 /* main                                                                 */
 /* ------------------------------------------------------------------ */
 
-int main(void) {
+int main(void)
+{
     int m;
     int y;
     int i;
@@ -236,14 +268,16 @@ int main(void) {
     puts("cal - Unix V7 calendar");
     puts("----------------------");
 
-    while (1) {
+    while (1)
+    {
         print_str("Month (1-12, 0=quit): ");
         m = readint();
 
         if (m == 0 || m == -1)
             break;
 
-        if (m < 1 || m > 12) {
+        if (m < 1 || m > 12)
+        {
             puts("Bad month (1-12)");
             continue;
         }
@@ -251,11 +285,12 @@ int main(void) {
         print_str("Year  (1-9999):       ");
         y = readint();
 
-        if (y < 1 || y > 9999) {
+        if (y < 1 || y > 9999)
+        {
             puts("Bad year (1-9999)");
             continue;
         }
-
+        // print_str("ok1");
         /* Zero the grid buffer */
         memset(string, 0, 144);
 

@@ -12,14 +12,15 @@
 /// i.e. two consecutive ROM instructions where the second jumps back to
 /// the first unconditionally. We also accept a cycle-count limit as a
 /// safety net.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
 fn usage() -> ! {
-    eprintln!("Usage: hack_emu <file.asm> [--max-cycles N] [--dump-ram N] [--screen <out.ppm>] [--trace]");
+    eprintln!(
+        "Usage: hack_emu <file.asm> [--max-cycles N] [--dump-ram N] [--screen <out.ppm>] [--trace]"
+    );
     std::process::exit(1);
 }
 
@@ -35,7 +36,9 @@ struct Args {
 
 fn parse_args() -> Args {
     let raw: Vec<String> = std::env::args().skip(1).collect();
-    if raw.is_empty() { usage(); }
+    if raw.is_empty() {
+        usage();
+    }
     let mut path = None;
     let mut max_cycles = 10_000_000u64;
     let mut dump_ram = 0usize;
@@ -47,34 +50,56 @@ fn parse_args() -> Args {
         match raw[i].as_str() {
             "--max-cycles" => {
                 i += 1;
-                max_cycles = raw.get(i).and_then(|s| s.parse().ok()).unwrap_or_else(|| usage());
+                max_cycles = raw
+                    .get(i)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(|| usage());
             }
             "--dump-ram" => {
                 i += 1;
-                dump_ram = raw.get(i).and_then(|s| s.parse().ok()).unwrap_or_else(|| usage());
+                dump_ram = raw
+                    .get(i)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(|| usage());
             }
             "--screen" => {
                 i += 1;
                 screen_out = Some(PathBuf::from(raw.get(i).unwrap_or_else(|| usage())));
             }
-            "--trace" => { trace = true; }
-            "--quiet" => { quiet = true; }
-            s if s.starts_with("--") => { eprintln!("unknown flag: {}", s); usage(); }
+            "--trace" => {
+                trace = true;
+            }
+            "--quiet" => {
+                quiet = true;
+            }
+            s if s.starts_with("--") => {
+                eprintln!("unknown flag: {}", s);
+                usage();
+            }
             s => {
-                if path.is_some() { usage(); }
+                if path.is_some() {
+                    usage();
+                }
                 path = Some(PathBuf::from(s));
             }
         }
         i += 1;
     }
-    Args { path: path.unwrap_or_else(|| usage()), max_cycles, dump_ram, screen_out, trace, quiet }
+    Args {
+        path: path.unwrap_or_else(|| usage()),
+        max_cycles,
+        dump_ram,
+        screen_out,
+        trace,
+        quiet,
+    }
 }
 
 // ── Assembler ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 enum Instr {
-    A(i16),          // A-instruction: load 15-bit value into A
+    A(i16), // A-instruction: load 15-bit value into A
     C {
         comp: String,
         dest: String,
@@ -85,13 +110,13 @@ enum Instr {
 /// Predefined symbols
 fn predefined() -> HashMap<String, i16> {
     let mut m = HashMap::new();
-    m.insert("SP".into(),     0);
-    m.insert("LCL".into(),    1);
-    m.insert("ARG".into(),    2);
-    m.insert("THIS".into(),   3);
-    m.insert("THAT".into(),   4);
+    m.insert("SP".into(), 0);
+    m.insert("LCL".into(), 1);
+    m.insert("ARG".into(), 2);
+    m.insert("THIS".into(), 3);
+    m.insert("THAT".into(), 4);
     m.insert("SCREEN".into(), 16384);
-    m.insert("KBD".into(),    24576);
+    m.insert("KBD".into(), 24576);
     for i in 0i16..=15 {
         m.insert(format!("R{}", i), i);
     }
@@ -113,9 +138,11 @@ fn assemble_with_var_base(src: &str, var_base: i16) -> Result<Vec<Instr>, String
     let mut rom_addr = 0i16;
     for line in src.lines() {
         let line = strip_comment(line).trim().to_string();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         if line.starts_with('(') && line.ends_with(')') {
-            let label = &line[1..line.len()-1];
+            let label = &line[1..line.len() - 1];
             symbols.insert(label.to_string(), rom_addr);
         } else {
             rom_addr += 1;
@@ -128,8 +155,12 @@ fn assemble_with_var_base(src: &str, var_base: i16) -> Result<Vec<Instr>, String
 
     for line in src.lines() {
         let line = strip_comment(line).trim().to_string();
-        if line.is_empty() { continue; }
-        if line.starts_with('(') { continue; } // label — skip
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('(') {
+            continue;
+        } // label — skip
 
         if let Some(rest) = line.strip_prefix('@') {
             // A-instruction
@@ -147,12 +178,12 @@ fn assemble_with_var_base(src: &str, var_base: i16) -> Result<Vec<Instr>, String
         } else {
             // C-instruction: [dest=]comp[;jump]
             let (dest, rest) = if let Some(pos) = line.find('=') {
-                (line[..pos].to_string(), line[pos+1..].to_string())
+                (line[..pos].to_string(), line[pos + 1..].to_string())
             } else {
                 (String::new(), line.clone())
             };
             let (comp, jump) = if let Some(pos) = rest.find(';') {
-                (rest[..pos].to_string(), rest[pos+1..].to_string())
+                (rest[..pos].to_string(), rest[pos + 1..].to_string())
             } else {
                 (rest, String::new())
             };
@@ -211,7 +242,8 @@ fn decode_comp(bits: u16) -> Result<String, String> {
         0b0_010101 => "D|A",
         0b1_010101 => "D|M",
         other => return Err(format!("unknown comp bits: 0b{:07b}", other)),
-    }.to_string())
+    }
+    .to_string())
 }
 
 fn decode_dest(bits: u16) -> &'static str {
@@ -260,7 +292,9 @@ fn load_hackem(src: &str) -> Result<(Vec<Instr>, Vec<i16>), String> {
 
     for line in lines {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
 
         if let Some(addr_hex) = line.strip_prefix("ROM@") {
             let _ = u32::from_str_radix(addr_hex, 16)
@@ -278,8 +312,8 @@ fn load_hackem(src: &str) -> Result<(Vec<Instr>, Vec<i16>), String> {
             continue;
         }
 
-        let word = u16::from_str_radix(line, 16)
-            .map_err(|_| format!("bad hex word: {:?}", line))?;
+        let word =
+            u16::from_str_radix(line, 16).map_err(|_| format!("bad hex word: {:?}", line))?;
 
         if in_rom {
             rom.push(decode_word(word)?);
@@ -303,6 +337,73 @@ fn strip_comment(line: &str) -> &str {
     }
 }
 
+/// Load a `.hack` file (nand2tetris binary format): one 16-bit word per line as binary string.
+fn load_hack(src: &str) -> Result<(Vec<Instr>, Vec<i16>), String> {
+    let mut rom: Vec<Instr> = Vec::new();
+    for line in src.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        if line.len() != 16 || !line.chars().all(|c| c == '0' || c == '1') {
+            return Err(format!("invalid .hack line: {:?}", line));
+        }
+        let word = u16::from_str_radix(line, 2)
+            .map_err(|_| format!("bad binary in .hack line: {:?}", line))?;
+        rom.push(decode_word(word)?);
+    }
+    Ok((rom, vec![0i16; RAM_SIZE]))
+}
+
+/// Load a `.tst` file (nand2tetris test script).
+/// Finds the companion `.hack` file (first tries `{tst_stem}.hack` sibling,
+/// then the filename from the `load X.hack` directive),
+/// loads it as ROM, and applies any `set RAM[N] V` lines to the initial RAM.
+fn load_tst(src: &str, tst_path: &std::path::Path) -> Result<(Vec<Instr>, Vec<i16>), String> {
+    let mut hack_file_from_directive: Option<String> = None;
+    let mut ram = vec![0i16; RAM_SIZE];
+
+    for line in src.lines() {
+        let line = line.trim();
+        // `load prog.hack,`
+        if let Some(rest) = line.strip_prefix("load ") {
+            let name = rest.trim_end_matches(',').trim();
+            hack_file_from_directive = Some(name.to_string());
+            continue;
+        }
+        // `set RAM[N] V,`
+        if let Some(rest) = line.strip_prefix("set RAM[") {
+            if let Some(close) = rest.find(']') {
+                let addr_str = &rest[..close];
+                let val_part = rest[close + 1..].trim().trim_end_matches(',').trim();
+                if let (Ok(addr), Ok(val)) = (addr_str.parse::<usize>(), val_part.parse::<i16>()) {
+                    if addr < RAM_SIZE {
+                        ram[addr] = val;
+                    }
+                }
+            }
+        }
+    }
+
+    let parent = tst_path.parent()
+        .ok_or("cannot get parent dir of .tst file")?;
+
+    // 1. Try companion with same stem as the .tst file (what hack_ld produces).
+    let stem_hack = tst_path.with_extension("hack");
+    let hack_src = if stem_hack.exists() {
+        std::fs::read_to_string(&stem_hack)
+            .map_err(|e| format!("cannot read {:?}: {}", stem_hack, e))?
+    } else {
+        // 2. Fall back to the filename from the `load` directive.
+        let hack_name = hack_file_from_directive
+            .ok_or("no 'load' directive found in .tst file")?;
+        let hack_path = parent.join(&hack_name);
+        std::fs::read_to_string(&hack_path)
+            .map_err(|e| format!("cannot read companion {:?}: {}", hack_path, e))?
+    };
+
+    let (rom, _) = load_hack(&hack_src)?;
+    Ok((rom, ram))
+}
+
 // ── CPU ──────────────────────────────────────────────────────────────────────
 
 const RAM_SIZE: usize = 32768;
@@ -314,13 +415,13 @@ const OUTPUT_PORT: usize = 32767;
 /// First word of the Hack screen memory map (16384 words × 16 bits = 512×256 pixels).
 pub const SCREEN_BASE: usize = 16384;
 /// One past the last screen word.
-pub const SCREEN_END:  usize = 24576; // 16384 + 256*32
+pub const SCREEN_END: usize = 24576; // 16384 + 256*32
 
 /// Return whether pixel (x, y) is set (black) in `ram`.
 /// x ∈ [0,511], y ∈ [0,255].
 pub fn pixel_set(ram: &[i16], x: usize, y: usize) -> bool {
     let addr = SCREEN_BASE + y * 32 + x / 16;
-    let bit  = x % 16;
+    let bit = x % 16;
     (ram[addr] as u16 >> bit) & 1 != 0
 }
 
@@ -346,7 +447,8 @@ pub fn render_screen_ppm(ram: &[i16]) -> Vec<u8> {
 pub fn render_screen_ascii(ram: &[i16]) -> String {
     let mut s = String::with_capacity(256 * (256 + 1));
     for row in 0..256usize {
-        for col in (0..512usize).step_by(2) { // sample every other column
+        for col in (0..512usize).step_by(2) {
+            // sample every other column
             s.push(if pixel_set(ram, col, row) { '#' } else { ' ' });
         }
         s.push('\n');
@@ -366,7 +468,9 @@ struct Cpu {
 impl Cpu {
     fn new() -> Self {
         Self {
-            a: 0, d: 0, pc: 0,
+            a: 0,
+            d: 0,
+            pc: 0,
             ram: vec![0; RAM_SIZE],
             output: Vec::new(),
         }
@@ -382,18 +486,18 @@ impl Cpu {
         let d = self.d;
         let m = self.m();
         match comp {
-            "0"   => 0,
-            "1"   => 1,
-            "-1"  => -1,
-            "D"   => d,
-            "A"   => a,
-            "M"   => m,
-            "!D"  => !d,
-            "!A"  => !a,
-            "!M"  => !m,
-            "-D"  => d.wrapping_neg(),
-            "-A"  => a.wrapping_neg(),
-            "-M"  => m.wrapping_neg(),
+            "0" => 0,
+            "1" => 1,
+            "-1" => -1,
+            "D" => d,
+            "A" => a,
+            "M" => m,
+            "!D" => !d,
+            "!A" => !a,
+            "!M" => !m,
+            "-D" => d.wrapping_neg(),
+            "-A" => a.wrapping_neg(),
+            "-M" => m.wrapping_neg(),
             "D+1" => d.wrapping_add(1),
             "A+1" => a.wrapping_add(1),
             "M+1" => m.wrapping_add(1),
@@ -410,9 +514,9 @@ impl Cpu {
             "M-D" => m.wrapping_sub(d),
             "D&M" => d & m,
             "D|M" => d | m,
-            "M+D" => m.wrapping_add(d),  // alias
-            "A+D" => a.wrapping_add(d),  // alias
-            _     => panic!("unknown comp: {:?}", comp),
+            "M+D" => m.wrapping_add(d), // alias
+            "A+D" => a.wrapping_add(d), // alias
+            _ => panic!("unknown comp: {:?}", comp),
         }
     }
 
@@ -421,8 +525,12 @@ impl Cpu {
         // In the Hack CPU, M always refers to RAM[A_before], even when A is
         // also a destination of the same instruction.
         let m_addr = self.a as usize;
-        if dest.contains('A') { self.a = val; }
-        if dest.contains('D') { self.d = val; }
+        if dest.contains('A') {
+            self.a = val;
+        }
+        if dest.contains('D') {
+            self.d = val;
+        }
         if dest.contains('M') && m_addr < RAM_SIZE {
             self.ram[m_addr] = val;
             if m_addr == OUTPUT_PORT && val > 0 {
@@ -451,21 +559,36 @@ impl Cpu {
             return false; // ran off end
         }
         if trace {
-            eprint!("PC={:4} A={:6} D={:6} M={:6}  ",
-                self.pc, self.a, self.d, self.m());
+            eprint!(
+                "PC={:4} A={:6} D={:6} M={:6}  ",
+                self.pc,
+                self.a,
+                self.d,
+                self.m()
+            );
         }
         match &rom[self.pc] {
             Instr::A(val) => {
-                if trace { eprintln!("@{}", val); }
+                if trace {
+                    eprintln!("@{}", val);
+                }
                 self.a = *val;
                 self.pc += 1;
             }
             Instr::C { comp, dest, jump } => {
-                if trace { eprintln!("{}{}{}{}",
-                    if dest.is_empty() { String::new() } else { format!("{}=", dest) },
-                    comp,
-                    if jump.is_empty() { "" } else { ";" },
-                    jump); }
+                if trace {
+                    eprintln!(
+                        "{}{}{}{}",
+                        if dest.is_empty() {
+                            String::new()
+                        } else {
+                            format!("{}=", dest)
+                        },
+                        comp,
+                        if jump.is_empty() { "" } else { ";" },
+                        jump
+                    );
+                }
                 let val = self.compute(comp);
                 self.apply_dest(dest, val);
                 if Self::should_jump(jump, val) {
@@ -500,6 +623,18 @@ fn main() {
             eprintln!("hackem load error: {}", e);
             std::process::exit(1);
         })
+    } else if src.lines().next().map(|l| l.len() == 16 && l.chars().all(|c| c == '0' || c == '1')).unwrap_or(false) {
+        // .hack format: lines of 16 binary digits
+        load_hack(&src).unwrap_or_else(|e| {
+            eprintln!("hack load error: {}", e);
+            std::process::exit(1);
+        })
+    } else if args.path.extension().and_then(|e| e.to_str()) == Some("tst") {
+        // .tst format: nand2tetris test script with companion .hack
+        load_tst(&src, &args.path).unwrap_or_else(|e| {
+            eprintln!("tst load error: {}", e);
+            std::process::exit(1);
+        })
     } else {
         let instr = assemble(&src).unwrap_or_else(|e| {
             eprintln!("assemble error: {}", e);
@@ -525,7 +660,10 @@ fn main() {
     loop {
         if cycles >= args.max_cycles {
             if !args.quiet {
-                println!("Reached cycle limit ({} cycles) — possibly infinite loop or very slow program", args.max_cycles);
+                println!(
+                    "Reached cycle limit ({} cycles) — possibly infinite loop or very slow program",
+                    args.max_cycles
+                );
             }
             break;
         }
@@ -589,7 +727,7 @@ mod tests {
 
     /// Compile and run, returning (return_value, output_string, full_ram).
     fn compile_and_run_ext(c_src: &str, max_cycles: u64) -> (i16, String, Vec<i16>) {
-        use hack_cc::output::{emit, OutputFormat};
+        use hack_cc::output::{OutputFormat, emit};
         use hack_cc::{CompileOptions, compile_with_full_options};
         use std::path::PathBuf;
 
@@ -621,7 +759,9 @@ mod tests {
         let mut cpu = Cpu::new();
         let mut cycles = 0u64;
         loop {
-            if cycles >= max_cycles || !cpu.step(&rom, false) { break; }
+            if cycles >= max_cycles || !cpu.step(&rom, false) {
+                break;
+            }
             cycles += 1;
         }
         let output = String::from_utf8_lossy(&cpu.output).into_owned();
@@ -639,7 +779,8 @@ mod tests {
         let result = compile_and_run(
             "int add(int a, int b) { return a + b; }
              int main() { return add(10, 20); }",
-            500_000);
+            500_000,
+        );
         assert_eq!(result, 30);
     }
 
@@ -659,7 +800,8 @@ mod tests {
                 y = 8;
                 return x + y;
              }",
-            500_000);
+            500_000,
+        );
         assert_eq!(result, 15);
     }
 
@@ -670,7 +812,8 @@ mod tests {
                 if (a > b) { return a; } else { return b; }
              }
              int main() { return max(5, 12); }",
-            500_000);
+            500_000,
+        );
         assert_eq!(result, 12);
     }
 
@@ -689,7 +832,8 @@ mod tests {
                 }
                 return sum;
              }",
-            500_000);
+            500_000,
+        );
         assert_eq!(result, 55);
     }
 
@@ -706,31 +850,26 @@ mod tests {
                 }
                 return acc;
              }",
-            500_000);
+            500_000,
+        );
         assert_eq!(result, 45); // 0+1+...+9
     }
 
     #[test]
     fn test_multiply() {
-        let result = compile_and_run(
-            "int main() { return 6 * 7; }",
-            2_000_000);
+        let result = compile_and_run("int main() { return 6 * 7; }", 2_000_000);
         assert_eq!(result, 42);
     }
 
     #[test]
     fn test_divide() {
-        let result = compile_and_run(
-            "int main() { return 100 / 4; }",
-            2_000_000);
+        let result = compile_and_run("int main() { return 100 / 4; }", 2_000_000);
         assert_eq!(result, 25);
     }
 
     #[test]
     fn test_modulo() {
-        let result = compile_and_run(
-            "int main() { return 17 % 5; }",
-            2_000_000);
+        let result = compile_and_run("int main() { return 17 % 5; }", 2_000_000);
         assert_eq!(result, 2);
     }
 
@@ -747,7 +886,8 @@ mod tests {
                 return result;
              }
              int main() { return factorial(5); }",
-            5_000_000);
+            5_000_000,
+        );
         assert_eq!(result, 120);
     }
 
@@ -759,7 +899,8 @@ mod tests {
                 return fib(n - 1) + fib(n - 2);
              }
              int main() { return fib(8); }",
-            5_000_000);
+            5_000_000,
+        );
         assert_eq!(result, 21);
     }
 
@@ -769,7 +910,8 @@ mod tests {
             "int g;
              void inc() { g = g + 1; }
              int main() { g = 10; inc(); inc(); inc(); return g; }",
-            500_000);
+            500_000,
+        );
         assert_eq!(result, 13);
     }
 
@@ -784,7 +926,8 @@ mod tests {
                 if (a > b && b > 0) { return 1; }
                 return 0;
              }",
-            500_000);
+            500_000,
+        );
         assert_eq!(result, 1);
     }
 
@@ -800,7 +943,8 @@ mod tests {
                 if (1 < 2)  { r = r + 8; }
                 return r;
              }",
-            500_000);
+            500_000,
+        );
         assert_eq!(result, 15);
     }
 
@@ -817,7 +961,8 @@ mod tests {
     fn test_char_arithmetic() {
         let result = compile_and_run(
             "int main() { char lo = 'a'; char hi = 'z'; return hi - lo; }",
-            100_000);
+            100_000,
+        );
         assert_eq!(result, 25);
     }
 
@@ -825,32 +970,27 @@ mod tests {
     fn test_putchar_output() {
         let (ret, out) = compile_and_run_full(
             "int main() { putchar('H'); putchar('i'); putchar('!'); return 0; }",
-            500_000);
+            500_000,
+        );
         assert_eq!(ret, 0);
         assert_eq!(out, "Hi!");
     }
 
     #[test]
     fn test_strlen_basic() {
-        let result = compile_and_run(
-            r#"int main() { return strlen("hello"); }"#,
-            500_000);
+        let result = compile_and_run(r#"int main() { return strlen("hello"); }"#, 500_000);
         assert_eq!(result, 5);
     }
 
     #[test]
     fn test_strlen_empty() {
-        let result = compile_and_run(
-            r#"int main() { return strlen(""); }"#,
-            500_000);
+        let result = compile_and_run(r#"int main() { return strlen(""); }"#, 500_000);
         assert_eq!(result, 0);
     }
 
     #[test]
     fn test_puts_output() {
-        let (ret, out) = compile_and_run_full(
-            r#"int main() { puts("Hi"); return 0; }"#,
-            500_000);
+        let (ret, out) = compile_and_run_full(r#"int main() { puts("Hi"); return 0; }"#, 500_000);
         assert_eq!(ret, 0);
         assert_eq!(out, "Hi\n");
     }
@@ -858,9 +998,7 @@ mod tests {
     #[test]
     fn test_string_index() {
         // Index into a string literal pointer
-        let result = compile_and_run(
-            r#"int main() { char *s = "ABC"; return s[1]; }"#,
-            500_000);
+        let result = compile_and_run(r#"int main() { char *s = "ABC"; return s[1]; }"#, 500_000);
         assert_eq!(result, 66); // 'B'
     }
 
@@ -869,7 +1007,8 @@ mod tests {
         // Same literal used twice shares storage; strlen correct
         let result = compile_and_run(
             r#"int main() { char *a = "xy"; char *b = "xy"; return strlen(a) + strlen(b); }"#,
-            500_000);
+            500_000,
+        );
         assert_eq!(result, 4);
     }
 
@@ -877,11 +1016,12 @@ mod tests {
 
     #[test]
     fn test_fill_screen() {
-        let (_, _, ram) = compile_and_run_ext(
-            "int main() { fill_screen(); return 0; }",
-            5_000_000);
+        let (_, _, ram) = compile_and_run_ext("int main() { fill_screen(); return 0; }", 5_000_000);
         // Every screen word should be -1 (0xFFFF)
-        assert_eq!(ram[SCREEN_BASE], -1, "RAM[16384] should be -1 after fill_screen");
+        assert_eq!(
+            ram[SCREEN_BASE], -1,
+            "RAM[16384] should be -1 after fill_screen"
+        );
         assert_eq!(ram[SCREEN_BASE + 100], -1);
         assert_eq!(ram[SCREEN_END - 1], -1);
     }
@@ -890,8 +1030,12 @@ mod tests {
     fn test_clear_screen() {
         let (_, _, ram) = compile_and_run_ext(
             "int main() { fill_screen(); clear_screen(); return 0; }",
-            10_000_000);
-        assert_eq!(ram[SCREEN_BASE], 0, "RAM[16384] should be 0 after clear_screen");
+            10_000_000,
+        );
+        assert_eq!(
+            ram[SCREEN_BASE], 0,
+            "RAM[16384] should be 0 after clear_screen"
+        );
         assert_eq!(ram[SCREEN_BASE + 100], 0);
         assert_eq!(ram[SCREEN_END - 1], 0);
     }
@@ -899,9 +1043,8 @@ mod tests {
     #[test]
     fn test_draw_pixel_origin() {
         // draw_pixel(0, 0) sets bit 0 of RAM[16384]
-        let (_, _, ram) = compile_and_run_ext(
-            "int main() { draw_pixel(0, 0); return 0; }",
-            2_000_000);
+        let (_, _, ram) =
+            compile_and_run_ext("int main() { draw_pixel(0, 0); return 0; }", 2_000_000);
         assert!(pixel_set(&ram, 0, 0), "pixel (0,0) should be set");
         assert!(!pixel_set(&ram, 1, 0), "pixel (1,0) should NOT be set");
     }
@@ -909,9 +1052,8 @@ mod tests {
     #[test]
     fn test_draw_pixel_bit15() {
         // draw_pixel(15, 0) sets bit 15 (MSB) of RAM[16384]
-        let (_, _, ram) = compile_and_run_ext(
-            "int main() { draw_pixel(15, 0); return 0; }",
-            2_000_000);
+        let (_, _, ram) =
+            compile_and_run_ext("int main() { draw_pixel(15, 0); return 0; }", 2_000_000);
         assert!(pixel_set(&ram, 15, 0));
         assert!(!pixel_set(&ram, 14, 0));
         // bit 15 of RAM[16384] = 1 means the i16 value is negative
@@ -921,9 +1063,8 @@ mod tests {
     #[test]
     fn test_draw_pixel_next_word() {
         // draw_pixel(16, 0) sets bit 0 of RAM[16385]
-        let (_, _, ram) = compile_and_run_ext(
-            "int main() { draw_pixel(16, 0); return 0; }",
-            2_000_000);
+        let (_, _, ram) =
+            compile_and_run_ext("int main() { draw_pixel(16, 0); return 0; }", 2_000_000);
         assert!(pixel_set(&ram, 16, 0));
         assert_eq!(ram[SCREEN_BASE], 0, "word 0 should be untouched");
         assert_eq!(ram[SCREEN_BASE + 1] & 1, 1, "bit 0 of word 1 should be set");
@@ -932,9 +1073,8 @@ mod tests {
     #[test]
     fn test_draw_pixel_row1() {
         // draw_pixel(0, 1) sets bit 0 of RAM[16384 + 32] = RAM[16416]
-        let (_, _, ram) = compile_and_run_ext(
-            "int main() { draw_pixel(0, 1); return 0; }",
-            2_000_000);
+        let (_, _, ram) =
+            compile_and_run_ext("int main() { draw_pixel(0, 1); return 0; }", 2_000_000);
         assert!(pixel_set(&ram, 0, 1));
         assert_eq!(ram[SCREEN_BASE], 0, "row 0 should be untouched");
         assert_eq!(ram[SCREEN_BASE + 32] & 1, 1);
@@ -945,7 +1085,8 @@ mod tests {
         // Set pixel then clear it
         let (_, _, ram) = compile_and_run_ext(
             "int main() { draw_pixel(5, 3); clear_pixel(5, 3); return 0; }",
-            4_000_000);
+            4_000_000,
+        );
         assert!(!pixel_set(&ram, 5, 3), "pixel should be cleared");
         // neighbour pixels unaffected
         assert!(!pixel_set(&ram, 4, 3));
@@ -956,7 +1097,8 @@ mod tests {
     fn test_draw_multiple_pixels() {
         let (_, _, ram) = compile_and_run_ext(
             "int main() { draw_pixel(3, 5); draw_pixel(7, 5); return 0; }",
-            4_000_000);
+            4_000_000,
+        );
         assert!(pixel_set(&ram, 3, 5));
         assert!(pixel_set(&ram, 7, 5));
         assert!(!pixel_set(&ram, 4, 5));
@@ -984,60 +1126,69 @@ mod tests {
     fn test_font_table_init() {
         use hack_cc::FONT_BASE;
         // draw_char triggers font table initialization in RAM
-        let (_, _, ram) = compile_and_run_ext(
-            "int main() { draw_char(0, 0, 65); return 0; }",
-            4_000_000,
-        );
+        let (_, _, ram) =
+            compile_and_run_ext("int main() { draw_char(0, 0, 65); return 0; }", 4_000_000);
         // 'A' is char index 33 (65-32), 11 rows per char in Jack OS 8×11 font
         // FONT_8X11[33] = [12,30,51,51,63,51,51,51,51,0,0]
         // Jack OS font uses bit-0=leftmost, matching Hack screen — stored as-is.
         let a_base = FONT_BASE + 33 * 11;
-        assert_eq!(ram[a_base]     as u16, 12u16,  "row0 of 'A'");
-        assert_eq!(ram[a_base + 1] as u16, 30u16,  "row1 of 'A'");
-        assert_eq!(ram[a_base + 4] as u16, 63u16,  "row4 of 'A'");
-        assert_eq!(ram[a_base + 9] as u16, 0u16,   "row9 of 'A' (blank)");
+        assert_eq!(ram[a_base] as u16, 12u16, "row0 of 'A'");
+        assert_eq!(ram[a_base + 1] as u16, 30u16, "row1 of 'A'");
+        assert_eq!(ram[a_base + 4] as u16, 63u16, "row4 of 'A'");
+        assert_eq!(ram[a_base + 9] as u16, 0u16, "row9 of 'A' (blank)");
     }
 
     /// draw_char(0, 0, 'A') at even col.
     /// Jack OS 'A' row0=12=0x0C → bits 2,3 set in low byte → pixels (2,0),(3,0).
     #[test]
     fn test_draw_char_even_col() {
-        let (ret, _, ram) = compile_and_run_ext(
-            "int main() { draw_char(0, 0, 65); return 0; }",
-            4_000_000,
-        );
+        let (ret, _, ram) =
+            compile_and_run_ext("int main() { draw_char(0, 0, 65); return 0; }", 4_000_000);
         assert_eq!(ret, 0);
         // Row 0 of 'A': 12 = 0x0C stored in low byte → bits 2,3 set → pixels 2,3
-        assert!( pixel_set(&ram, 2, 0), "pixel (2,0) should be set for 'A' row0");
-        assert!( pixel_set(&ram, 3, 0), "pixel (3,0) should be set for 'A' row0");
+        assert!(
+            pixel_set(&ram, 2, 0),
+            "pixel (2,0) should be set for 'A' row0"
+        );
+        assert!(
+            pixel_set(&ram, 3, 0),
+            "pixel (3,0) should be set for 'A' row0"
+        );
         assert!(!pixel_set(&ram, 0, 0), "pixel (0,0) should be clear");
         assert!(!pixel_set(&ram, 7, 0), "pixel (7,0) should be clear");
         // Row 4 of 'A': 63 = 0x3F -> bits 0..5 set → pixels 0..5
-        assert!( pixel_set(&ram, 0, 4), "pixel (0,4) for 'A' row4");
-        assert!( pixel_set(&ram, 5, 4), "pixel (5,4) for 'A' row4");
-        assert!(!pixel_set(&ram, 6, 4), "pixel (6,4) should be clear for 'A' row4");
-        assert!(!pixel_set(&ram, 7, 4), "pixel (7,4) should be clear for 'A' row4");
+        assert!(pixel_set(&ram, 0, 4), "pixel (0,4) for 'A' row4");
+        assert!(pixel_set(&ram, 5, 4), "pixel (5,4) for 'A' row4");
+        assert!(
+            !pixel_set(&ram, 6, 4),
+            "pixel (6,4) should be clear for 'A' row4"
+        );
+        assert!(
+            !pixel_set(&ram, 7, 4),
+            "pixel (7,4) should be clear for 'A' row4"
+        );
         // Row 9 of 'A': 0 -> no pixels
-        assert!(!pixel_set(&ram, 2, 9), "pixel (2,9) should be clear (blank row)");
+        assert!(
+            !pixel_set(&ram, 2, 9),
+            "pixel (2,9) should be clear (blank row)"
+        );
     }
 
     /// draw_char(1, 0, 'A') at odd col: font byte goes into high byte (bits 8-15).
     /// 'A' row 0 = 12 = 0x0C → high byte = 0x0C00 → bits 10,11 set → pixels 10,11.
     #[test]
     fn test_draw_char_odd_col() {
-        let (ret, _, ram) = compile_and_run_ext(
-            "int main() { draw_char(1, 0, 65); return 0; }",
-            4_000_000,
-        );
+        let (ret, _, ram) =
+            compile_and_run_ext("int main() { draw_char(1, 0, 65); return 0; }", 4_000_000);
         assert_eq!(ret, 0);
         // Row 0: 12 in high byte → bits 8+2=10, 8+3=11 set
-        assert!( pixel_set(&ram, 10, 0), "pixel (10,0) for odd-col 'A' row0");
-        assert!( pixel_set(&ram, 11, 0), "pixel (11,0) for odd-col 'A' row0");
-        assert!(!pixel_set(&ram,  8, 0), "pixel (8,0) should be clear");
+        assert!(pixel_set(&ram, 10, 0), "pixel (10,0) for odd-col 'A' row0");
+        assert!(pixel_set(&ram, 11, 0), "pixel (11,0) for odd-col 'A' row0");
+        assert!(!pixel_set(&ram, 8, 0), "pixel (8,0) should be clear");
         assert!(!pixel_set(&ram, 15, 0), "pixel (15,0) should be clear");
         // Row 4: 63 in high byte → bits 8..13 set → pixels 8..13
-        assert!( pixel_set(&ram,  8, 4), "pixel (8,4) for odd-col 'A' row4");
-        assert!( pixel_set(&ram, 13, 4), "pixel (13,4) for odd-col 'A' row4");
+        assert!(pixel_set(&ram, 8, 4), "pixel (8,4) for odd-col 'A' row4");
+        assert!(pixel_set(&ram, 13, 4), "pixel (13,4) for odd-col 'A' row4");
         assert!(!pixel_set(&ram, 14, 4), "pixel (14,4) should be clear");
         assert!(!pixel_set(&ram, 15, 4), "pixel (15,4) should be clear");
     }
@@ -1050,8 +1201,8 @@ mod tests {
             4_000_000,
         );
         assert_eq!(ret, 0);
-        assert!( pixel_set(&ram, 2, 0), "pixel (2,0) set by draw_string 'A'");
-        assert!( pixel_set(&ram, 3, 0), "pixel (3,0) set by draw_string 'A'");
+        assert!(pixel_set(&ram, 2, 0), "pixel (2,0) set by draw_string 'A'");
+        assert!(pixel_set(&ram, 3, 0), "pixel (3,0) set by draw_string 'A'");
         assert!(!pixel_set(&ram, 7, 0), "pixel (7,0) clear");
     }
 
@@ -1062,19 +1213,22 @@ mod tests {
     /// "Hello, World!" → row=44 → no pixels were rendered (blank screen).
     #[test]
     fn test_puts_screen_no_collision() {
+        use hack_cc::output::{OutputFormat, emit};
         use hack_cc::{CompileOptions, compile_with_full_options};
-        use hack_cc::output::{emit, OutputFormat};
         use std::path::PathBuf;
         let mut opts = CompileOptions {
             include_dirs: vec![PathBuf::from("include")],
             ..Default::default()
         };
-        opts.defines.insert("HACK_OUTPUT_SCREEN".to_string(), "1".to_string());
+        opts.defines
+            .insert("HACK_OUTPUT_SCREEN".to_string(), "1".to_string());
         let prog = compile_with_full_options(
             r#"#include <hack.h>
 int main() { puts_screen("Hello, World!"); return 0; }"#,
-            None, &opts,
-        ).unwrap_or_else(|e| panic!("compile error: {}", e));
+            None,
+            &opts,
+        )
+        .unwrap_or_else(|e| panic!("compile error: {}", e));
         let full_asm = emit(&prog, OutputFormat::Asm)
             .unwrap_or_else(|e| panic!("emit error: {}", e))
             .main;
@@ -1083,15 +1237,23 @@ int main() { puts_screen("Hello, World!"); return 0; }"#,
         let mut cpu = Cpu::new();
         let mut cycles = 0u64;
         loop {
-            if cycles >= 8_000_000 || !cpu.step(&rom, false) { break; }
+            if cycles >= 8_000_000 || !cpu.step(&rom, false) {
+                break;
+            }
             cycles += 1;
         }
         let ram = cpu.ram;
         assert_eq!(ram[256], 0);
         // At least some pixels must be set: "Hello" starts at col=0, row=0.
         // 'H' row0=0x33=51 → bits 0,1,4,5 set → pixels (0,0) and (1,0).
-        assert!(pixel_set(&ram, 0, 0), "pixel (0,0) should be set for 'H' row0 (no var collision)");
-        assert!(pixel_set(&ram, 1, 0), "pixel (1,0) should be set for 'H' row0 (no var collision)");
+        assert!(
+            pixel_set(&ram, 0, 0),
+            "pixel (0,0) should be set for 'H' row0 (no var collision)"
+        );
+        assert!(
+            pixel_set(&ram, 1, 0),
+            "pixel (1,0) should be set for 'H' row0 (no var collision)"
+        );
     }
 
     // ── Struct tests ─────────────────────────────────────────────────────
@@ -1099,7 +1261,8 @@ int main() { puts_screen("Hello, World!"); return 0; }"#,
     /// Basic struct: declare, write fields, read them back.
     #[test]
     fn test_struct_basic() {
-        let ret = compile_and_run(r#"
+        let ret = compile_and_run(
+            r#"
 struct Point { int x; int y; };
 int main() {
     struct Point p;
@@ -1107,14 +1270,17 @@ int main() {
     p.y = 20;
     return p.x + p.y;
 }
-"#, 500_000);
+"#,
+            500_000,
+        );
         assert_eq!(ret, 30);
     }
 
     /// Struct field overwrite.
     #[test]
     fn test_struct_field_write() {
-        let ret = compile_and_run(r#"
+        let ret = compile_and_run(
+            r#"
 struct Pair { int a; int b; };
 int main() {
     struct Pair q;
@@ -1123,14 +1289,17 @@ int main() {
     q.a = q.a + q.b;
     return q.a;
 }
-"#, 500_000);
+"#,
+            500_000,
+        );
         assert_eq!(ret, 10);
     }
 
     /// Struct passed via pointer; arrow operator.
     #[test]
     fn test_struct_pointer_arrow() {
-        let ret = compile_and_run(r#"
+        let ret = compile_and_run(
+            r#"
 struct Vec2 { int x; int y; };
 int main() {
     struct Vec2 v;
@@ -1140,14 +1309,17 @@ int main() {
     p->y = 9;
     return p->x + p->y;
 }
-"#, 500_000);
+"#,
+            500_000,
+        );
         assert_eq!(ret, 14);
     }
 
     /// Three-field struct: verify field offsets.
     #[test]
     fn test_struct_three_fields() {
-        let ret = compile_and_run(r#"
+        let ret = compile_and_run(
+            r#"
 struct Triple { int a; int b; int c; };
 int main() {
     struct Triple t;
@@ -1156,19 +1328,24 @@ int main() {
     t.c = 3;
     return t.a + t.b + t.c;
 }
-"#, 500_000);
+"#,
+            500_000,
+        );
         assert_eq!(ret, 6);
     }
 
     /// sizeof(struct) returns the number of words.
     #[test]
     fn test_struct_sizeof() {
-        let ret = compile_and_run(r#"
+        let ret = compile_and_run(
+            r#"
 struct Pair { int a; int b; };
 int main() {
     return sizeof(struct Pair);
 }
-"#, 200_000);
+"#,
+            200_000,
+        );
         assert_eq!(ret, 2);
     }
 
@@ -1179,17 +1356,21 @@ int main() {
     #[test]
     fn test_multi_param_function() {
         // Three-argument function with mixed arithmetic
-        let ret = compile_and_run(r#"
+        let ret = compile_and_run(
+            r#"
 int compute(int a, int b, int c) { return a * b + c; }
 int main() { return compute(3, 4, 5); }
-"#, 2_000_000);
+"#,
+            2_000_000,
+        );
         assert_eq!(ret, 17);
     }
 
     #[test]
     fn test_accumulate_via_globals() {
         // Simulate array accumulation using a global counter
-        let ret = compile_and_run(r#"
+        let ret = compile_and_run(
+            r#"
 int sum;
 void add_to_sum(int v) { sum = sum + v; }
 int main() {
@@ -1197,14 +1378,17 @@ int main() {
     add_to_sum(1); add_to_sum(2); add_to_sum(3); add_to_sum(4); add_to_sum(5);
     return sum;
 }
-"#, 500_000);
+"#,
+            500_000,
+        );
         assert_eq!(ret, 15);
     }
 
     #[test]
     fn test_pointer_index_via_struct() {
         // Use a struct to group multiple values; read by pointer
-        let ret = compile_and_run(r#"
+        let ret = compile_and_run(
+            r#"
 struct Pair { int x; int y; };
 int sum_pair(struct Pair *p) { return p->x + p->y; }
 int main() {
@@ -1213,7 +1397,9 @@ int main() {
     v.y = 13;
     return sum_pair(&v);
 }
-"#, 500_000);
+"#,
+            500_000,
+        );
         assert_eq!(ret, 21);
     }
 
@@ -1221,7 +1407,8 @@ int main() {
 
     #[test]
     fn test_pointer_deref_write() {
-        let ret = compile_and_run(r#"
+        let ret = compile_and_run(
+            r#"
 int main() {
     int x;
     int *p;
@@ -1229,13 +1416,16 @@ int main() {
     *p = 99;
     return x;
 }
-"#, 200_000);
+"#,
+            200_000,
+        );
         assert_eq!(ret, 99);
     }
 
     #[test]
     fn test_pointer_swap() {
-        let ret = compile_and_run(r#"
+        let ret = compile_and_run(
+            r#"
 void swap(int *a, int *b) {
     int tmp;
     tmp = *a;
@@ -1250,7 +1440,9 @@ int main() {
     swap(&x, &y);
     return x;
 }
-"#, 500_000);
+"#,
+            500_000,
+        );
         assert_eq!(ret, 7);
     }
 
@@ -1315,100 +1507,161 @@ int main() {
     #[test]
     fn test_no_runtime_without_mul() {
         let prog = hack_cc::compile("int main() { return 2 + 3; }").unwrap();
-        assert!(!prog.asm.contains("(__mul)"), "mul helper should not be emitted");
-        assert!(!prog.asm.contains("(__div)"), "div helper should not be emitted");
-        assert!(!prog.asm.contains("(__puts)"), "puts helper should not be emitted");
+        assert!(
+            !prog.asm.contains("(__mul)"),
+            "mul helper should not be emitted"
+        );
+        assert!(
+            !prog.asm.contains("(__div)"),
+            "div helper should not be emitted"
+        );
+        assert!(
+            !prog.asm.contains("(__puts)"),
+            "puts helper should not be emitted"
+        );
     }
 
     #[test]
     fn test_mul_emitted_when_used() {
         let prog = hack_cc::compile("int main() { return 6 * 7; }").unwrap();
-        assert!(prog.asm.contains("(__mul)"), "mul helper must be emitted when * is used");
+        assert!(
+            prog.asm.contains("(__mul)"),
+            "mul helper must be emitted when * is used"
+        );
     }
 
     #[test]
     fn test_div_emitted_when_used() {
         let prog = hack_cc::compile("int main() { return 10 / 2; }").unwrap();
-        assert!(prog.asm.contains("(__div)"), "div helper must be emitted when / is used");
+        assert!(
+            prog.asm.contains("(__div)"),
+            "div helper must be emitted when / is used"
+        );
     }
 
     #[test]
     fn test_puts_emitted_when_used() {
         use hack_cc::{CompileOptions, compile_with_full_options};
         use std::path::PathBuf;
-        let opts = CompileOptions { include_dirs: vec![PathBuf::from("include")], ..Default::default() };
+        let opts = CompileOptions {
+            include_dirs: vec![PathBuf::from("include")],
+            ..Default::default()
+        };
         let prog = compile_with_full_options(
             r#"#include <hack.h>
-int main() { puts("hi"); return 0; }"#, None, &opts).unwrap();
-        assert!(prog.asm.contains("(__puts)"), "puts helper must be emitted when puts() is called");
+int main() { puts("hi"); return 0; }"#,
+            None,
+            &opts,
+        )
+        .unwrap();
+        assert!(
+            prog.asm.contains("(__puts)"),
+            "puts helper must be emitted when puts() is called"
+        );
     }
 
     #[test]
     fn test_dead_function_eliminated() {
-        let prog = hack_cc::compile(
-            "int unused() { return 99; } int main() { return 1; }"
-        ).unwrap();
-        assert!(!prog.asm.contains("(unused)"), "unreachable function should not be emitted");
+        let prog =
+            hack_cc::compile("int unused() { return 99; } int main() { return 1; }").unwrap();
+        assert!(
+            !prog.asm.contains("(unused)"),
+            "unreachable function should not be emitted"
+        );
     }
 
     #[test]
     fn test_reachable_function_kept() {
-        let prog = hack_cc::compile(
-            "int used() { return 99; } int main() { return used(); }"
-        ).unwrap();
-        assert!(prog.asm.contains("(used)"), "reachable function must be emitted");
+        let prog =
+            hack_cc::compile("int used() { return 99; } int main() { return used(); }").unwrap();
+        assert!(
+            prog.asm.contains("(used)"),
+            "reachable function must be emitted"
+        );
     }
 
     // ── Output format tests ───────────────────────────────────────────────
 
     #[test]
     fn test_hack_format_binary_strings() {
-        use hack_cc::output::{emit, OutputFormat};
+        use hack_cc::output::{OutputFormat, emit};
         let prog = hack_cc::compile("int main() { return 0; }").unwrap();
         let result = emit(&prog, OutputFormat::Hack).unwrap();
         for line in result.main.lines() {
-            assert_eq!(line.len(), 16, "each .hack line must be 16 chars: {:?}", line);
-            assert!(line.chars().all(|c| c == '0' || c == '1'), "only 0/1 in .hack: {:?}", line);
+            assert_eq!(
+                line.len(),
+                16,
+                "each .hack line must be 16 chars: {:?}",
+                line
+            );
+            assert!(
+                line.chars().all(|c| c == '0' || c == '1'),
+                "only 0/1 in .hack: {:?}",
+                line
+            );
         }
     }
 
     #[test]
     fn test_hackem_format_header() {
-        use hack_cc::output::{emit, OutputFormat};
+        use hack_cc::output::{OutputFormat, emit};
         let prog = hack_cc::compile("int main() { return 0; }").unwrap();
         let result = emit(&prog, OutputFormat::Hackem).unwrap();
-        assert!(result.main.starts_with("hackem v1.0 0x"),
-            "hackem output must start with version header");
-        assert!(result.main.contains("ROM@"), "hackem output must have ROM@ section");
+        assert!(
+            result.main.starts_with("hackem v1.0 0x"),
+            "hackem output must start with version header"
+        );
+        assert!(
+            result.main.contains("ROM@"),
+            "hackem output must have ROM@ section"
+        );
     }
 
     #[test]
     fn test_hackem_global_initialized_in_bootstrap() {
-        use hack_cc::output::{emit, OutputFormat};
+        use hack_cc::output::{OutputFormat, emit};
         let prog = hack_cc::compile("int g = 42; int main() { return g; }").unwrap();
         // Globals are now initialized inline in bootstrap code (not RAM@ sections).
         // Verify the assembly contains the symbol and initializer value.
         let result = emit(&prog, OutputFormat::Asm).unwrap();
-        assert!(result.main.contains("@__g_g"), "global should produce symbolic reference");
-        assert!(result.main.contains("@42"), "global initializer value should appear in bootstrap");
+        assert!(
+            result.main.contains("@__g_g"),
+            "global should produce symbolic reference"
+        );
+        assert!(
+            result.main.contains("@42"),
+            "global initializer value should appear in bootstrap"
+        );
     }
 
     #[test]
     fn test_tst_format_has_companion() {
-        use hack_cc::output::{emit, OutputFormat};
+        use hack_cc::output::{OutputFormat, emit};
         let prog = hack_cc::compile("int main() { return 0; }").unwrap();
         let result = emit(&prog, OutputFormat::Tst).unwrap();
-        assert!(result.hack_companion.is_some(), "tst format must produce a companion .hack file");
-        assert!(result.main.contains("load"), "tst script must contain 'load'");
-        assert!(result.main.contains("ticktock"), "tst script must contain 'ticktock'");
+        assert!(
+            result.hack_companion.is_some(),
+            "tst format must produce a companion .hack file"
+        );
+        assert!(
+            result.main.contains("load"),
+            "tst script must contain 'load'"
+        );
+        assert!(
+            result.main.contains("ticktock"),
+            "tst script must contain 'ticktock'"
+        );
     }
 
     #[test]
     fn test_asm_format_no_companion() {
-        use hack_cc::output::{emit, OutputFormat};
+        use hack_cc::output::{OutputFormat, emit};
         let prog = hack_cc::compile("int main() { return 0; }").unwrap();
         let result = emit(&prog, OutputFormat::Asm).unwrap();
-        assert!(result.hack_companion.is_none(), "asm format must not produce a companion file");
+        assert!(
+            result.hack_companion.is_none(),
+            "asm format must not produce a companion file"
+        );
     }
 
     // ── Global variable initializer tests ────────────────────────────────
@@ -1423,7 +1676,8 @@ int main() { puts("hi"); return 0; }"#, None, &opts).unwrap();
     fn test_multiple_globals() {
         let ret = compile_and_run(
             "int a = 3; int b = 4; int main() { return a + b; }",
-            200_000);
+            200_000,
+        );
         assert_eq!(ret, 7);
     }
 
@@ -1431,11 +1685,14 @@ int main() { puts("hi"); return 0; }"#, None, &opts).unwrap();
 
     #[test]
     fn test_nested_calls() {
-        let ret = compile_and_run(r#"
+        let ret = compile_and_run(
+            r#"
 int double(int x) { return x + x; }
 int quad(int x)   { return double(double(x)); }
 int main() { return quad(3); }
-"#, 500_000);
+"#,
+            500_000,
+        );
         assert_eq!(ret, 12);
     }
 
@@ -1454,5 +1711,562 @@ int main() { return quad(3); }
         // 100 * 100 = 10000 (fits in i16: max 32767)
         let ret = compile_and_run("int main() { return 100 * 100; }", 5_000_000);
         assert_eq!(ret, 10000);
+    }
+    // #[test]
+    // fn misc_string_tests(){
+    //     let ret = compile_and_run(r#"
+    //     #include <hack.h>
+    //     int main(){
+    //       char msg[4]="abc";
+    //     //  int a = 4;//sizeof msg ;
+    //       //int b = strlen(msg);
+    //       return msg[1];
+    // }
+    //     "#, 5_000_000);
+    //     assert_eq!(ret, 7);
+    // }
+
+    // ── Bug regression tests ──────────────────────────────────────────────
+
+    /// Bug 1: sizeof(variable) — must return the size of the variable's type.
+    #[test]
+    fn test_sizeof_variable() {
+        let ret = compile_and_run(
+            r#"
+int main() {
+    int x;
+    char c;
+    return sizeof(x) * 10 + sizeof(c);
+}
+"#,
+            200_000,
+        );
+        // sizeof(int)==1, sizeof(char)==1 on this platform → 1*10+1=11
+        assert_eq!(ret, 11);
+    }
+
+    /// Bug 1: sizeof(array variable) — must return element-count of the array.
+    #[test]
+    fn test_sizeof_array_variable() {
+        let ret = compile_and_run(
+            r#"
+int main() {
+    int arr[5];
+    return sizeof(arr);
+}
+"#,
+            200_000,
+        );
+        assert_eq!(ret, 5);
+    }
+
+    /// Bug 2: char arr[N] = "str" — array elements must hold individual chars.
+    #[test]
+    fn test_char_array_string_init_first_char() {
+        let ret = compile_and_run(
+            r#"
+int main() {
+    char msg[4] = "abc";
+    return msg[0];
+}
+"#,
+            500_000,
+        );
+        assert_eq!(ret, b'a' as i16); // 97
+    }
+
+    /// Bug 2: char arr[N] = "str" — second element.
+    #[test]
+    fn test_char_array_string_init_second_char() {
+        let ret = compile_and_run(
+            r#"
+int main() {
+    char msg[4] = "abc";
+    return msg[1];
+}
+"#,
+            500_000,
+        );
+        assert_eq!(ret, b'b' as i16); // 98
+    }
+
+    /// Bug 2 + Bug 4: char arr[N] = "str" — null terminator at arr[len].
+    #[test]
+    fn test_char_array_string_init_null_terminator() {
+        let ret = compile_and_run(
+            r#"
+int main() {
+    char msg[4] = "abc";
+    return msg[3];
+}
+"#,
+            500_000,
+        );
+        assert_eq!(ret, 0); // null terminator
+    }
+
+    /// Bug 3: char arr[] = "str" — unsized array infers size from string literal.
+    #[test]
+    fn test_unsized_char_array_first_char() {
+        let ret = compile_and_run(
+            r#"
+int main() {
+    char msg[] = "abc";
+    return msg[0];
+}
+"#,
+            500_000,
+        );
+        assert_eq!(ret, b'a' as i16); // 97
+    }
+
+    /// Bug 3: char arr[] = "str" — second element.
+    #[test]
+    fn test_unsized_char_array_second_char() {
+        let ret = compile_and_run(
+            r#"
+int main() {
+    char msg[] = "abc";
+    return msg[1];
+}
+"#,
+            500_000,
+        );
+        assert_eq!(ret, b'b' as i16); // 98
+    }
+
+    /// Bug 3 + Bug 4: char arr[] = "str" — null terminator at inferred position.
+    #[test]
+    fn test_unsized_char_array_null_terminator() {
+        let ret = compile_and_run(
+            r#"
+int main() {
+    char msg[] = "abc";
+    return msg[3];
+}
+"#,
+            500_000,
+        );
+        assert_eq!(ret, 0); // null terminator
+    }
+
+    /// Bug 4: string literal null termination — index past last char must be 0.
+    #[test]
+    fn test_string_literal_null_termination() {
+        let ret = compile_and_run(
+            r#"
+int main() {
+    char *s = "hello";
+    return s[5] == 0 ? 42 : 0;
+}
+"#,
+            500_000,
+        );
+        assert_eq!(ret, 42);
+    }
+
+    // ── cal.c calendar algorithm tests ───────────────────────────────────────
+
+    /// Test jan1(): day-of-week for January 1, 1970 should be 4 (Thursday).
+    #[test]
+    fn test_cal_jan1_1970() {
+        let ret = compile_and_run(
+            r#"
+int jan1(int yr) {
+    int y;
+    int d;
+    y = yr;
+    d = 4 + y + (y + 3) / 4;
+    if (y > 1800) {
+        d = d - (y - 1701) / 100;
+        d = d + (y - 1601) / 400;
+    }
+    if (y > 1752)
+        d = d + 3;
+    return d % 7;
+}
+int main() { return jan1(1970); }
+"#,
+            500_000,
+        );
+        assert_eq!(ret, 4, "Jan 1, 1970 should be Thursday (4)");
+    }
+
+    /// Test cal() fills a buffer correctly: Jan 1, 1970 starts on Thursday (col 4).
+    /// The buffer slot for day 1 should be at byte offset 3*4=12 (tens place empty,
+    /// units '1', space). Check the units byte = '1'.
+    #[test]
+    fn test_cal_jan_1970_day1_slot() {
+        let ret = compile_and_run(
+            r#"
+int jan1(int yr) {
+    int y;
+    int d;
+    y = yr;
+    d = 4 + y + (y + 3) / 4;
+    if (y > 1800) {
+        d = d - (y - 1701) / 100;
+        d = d + (y - 1601) / 400;
+    }
+    if (y > 1752) d = d + 3;
+    return d % 7;
+}
+void cal(int m, int y, char *p, int w) {
+    int mon[13];
+    int d;
+    int i;
+    char *s;
+    mon[0]=0; mon[1]=31; mon[2]=29; mon[3]=31; mon[4]=30; mon[5]=31;
+    mon[6]=30; mon[7]=31; mon[8]=31; mon[9]=30; mon[10]=31; mon[11]=30; mon[12]=31;
+    s = p;
+    d = jan1(y);
+    switch ((jan1(y + 1) + 7 - d) % 7) {
+    case 1: mon[2] = 28; break;
+    case 2: break;
+    default: mon[9] = 19; break;
+    }
+    for (i = 1; i < m; i++) d = d + mon[i];
+    d = d % 7;
+    s = s + 3 * d;
+    for (i = 1; i <= mon[m]; i++) {
+        if (i == 3 && mon[m] == 19) { i = i + 11; mon[m] = mon[m] + 11; }
+        if (i > 9) *s = i / 10 + '0';
+        s++;
+        *s = i % 10 + '0';
+        s++;
+        *s = ' ';
+        s++;
+        if (++d == 7) { d = 0; s = p + w; p = s; }
+    }
+}
+char buf[144];
+int main() {
+    int i;
+    for (i = 0; i < 144; i++) buf[i] = 0;
+    cal(1, 1970, buf, 24);
+    /* Jan 1, 1970 is Thursday (col 4). Day 1 goes into slot 4.
+       Each slot is 3 bytes: [tens][units][space].
+       Slot 4 starts at byte 4*3=12. Units digit is at byte 13. */
+    return buf[13];
+}
+"#,
+            2_000_000,
+        );
+        assert_eq!(ret, b'1' as i16, "units digit of day 1 should be '1'");
+    }
+
+    // ── .hack and .tst format loading tests ──────────────────────────────────
+
+    /// Load a .hack binary file and run it — verifies load_hack() + decode_word().
+    #[test]
+    fn test_load_hack_format_and_run() {
+        use hack_cc::output::{OutputFormat, emit};
+        use hack_cc::compile;
+        let prog = compile("int main() { return 42; }").unwrap();
+        let result = emit(&prog, OutputFormat::Hack).unwrap();
+        // Parse the .hack binary back via load_hack
+        let (rom, _ram) = load_hack(&result.main).unwrap();
+        let mut cpu = Cpu::new();
+        let mut cycles = 0u64;
+        loop {
+            if cycles >= 2_000_000 || !cpu.step(&rom, false) { break; }
+            cycles += 1;
+        }
+        assert_eq!(cpu.ram[256], 42, "return value from .hack loaded program");
+    }
+
+    /// Load a .tst script with companion .hack — verifies load_tst() reads RAM[] settings
+    /// and loads the companion binary.
+    #[test]
+    fn test_load_tst_format_and_run() {
+        use hack_cc::output::{OutputFormat, emit};
+        use hack_cc::compile;
+        use std::fs;
+        let prog = compile("int main() { return 7; }").unwrap();
+        let result = emit(&prog, OutputFormat::Tst).unwrap();
+        // Write companion .hack to a temp file so load_tst can find it
+        let dir = std::env::temp_dir().join("hack_cc_tst_test");
+        fs::create_dir_all(&dir).unwrap();
+        // The .tst says "load prog.hack," so companion must be prog.hack
+        let hack_path = dir.join("prog.hack");
+        let tst_path  = dir.join("test_prog.tst");
+        fs::write(&hack_path, result.hack_companion.as_ref().unwrap()).unwrap();
+        fs::write(&tst_path, &result.main).unwrap();
+
+        let tst_src = fs::read_to_string(&tst_path).unwrap();
+        let (rom, ram) = load_tst(&tst_src, &tst_path).unwrap();
+        let mut cpu = Cpu::new();
+        for (i, &v) in ram.iter().enumerate() {
+            if v != 0 { cpu.ram[i] = v; }
+        }
+        let mut cycles = 0u64;
+        loop {
+            if cycles >= 2_000_000 || !cpu.step(&rom, false) { break; }
+            cycles += 1;
+        }
+        assert_eq!(cpu.ram[256], 7, "return value from .tst loaded program");
+    }
+
+    /// Regression: cal.c output should include the day-of-week header line on screen.
+    /// Uses HACK_OUTPUT_SCREEN and checks screen pixels for the 'S' glyph in row 1.
+    #[test]
+    fn test_cal_header_screen_mode() {
+        use hack_cc::output::{OutputFormat, emit};
+        use hack_cc::{CompileOptions, compile_with_full_options};
+        use std::path::PathBuf;
+        let mut opts = CompileOptions {
+            include_dirs: vec![PathBuf::from("include")],
+            ..Default::default()
+        };
+        opts.defines
+            .insert("HACK_OUTPUT_SCREEN".to_string(), "1".to_string());
+        // Simplified cal: no keyboard input, hardcoded month=1 year=1970
+        let prog = compile_with_full_options(
+            r#"#include <hack.h>
+char string[144];
+int jan1(int yr) {
+    int y; int d;
+    y = yr;
+    d = 4 + y + (y + 3) / 4;
+    if (y > 1800) { d = d - (y - 1701) / 100; d = d + (y - 1601) / 400; }
+    if (y > 1752) d = d + 3;
+    return d % 7;
+}
+void cal(int m, int y, char *p, int w) {
+    int mon[13];
+    int d; int i; char *s;
+    mon[0]=0; mon[1]=31; mon[2]=29; mon[3]=31; mon[4]=30; mon[5]=31;
+    mon[6]=30; mon[7]=31; mon[8]=31; mon[9]=30; mon[10]=31; mon[11]=30; mon[12]=31;
+    s = p;
+    d = jan1(y);
+    switch ((jan1(y + 1) + 7 - d) % 7) {
+    case 1: mon[2] = 28; break;
+    case 2: break;
+    default: mon[9] = 19; break;
+    }
+    for (i = 1; i < m; i++) d = d + mon[i];
+    d = d % 7;
+    s = p + d * 3;
+    for (i = 1; i <= mon[m]; i++) {
+        if (i > 9) *s = i / 10 + '0';
+        s++;
+        *s = i % 10 + '0';
+        s++;
+        *s = ' ';
+        s++;
+        if (++d == 7) { d = 0; s = p + (int)(s - p) / w * w; p = s; }
+    }
+}
+void pstr(char *str, int n) {
+    int i; int last;
+    for (i = 0; i < n; i++) if (str[i] == 0) str[i] = ' ';
+    last = 0;
+    for (i = 0; i < n; i++) if (str[i] != ' ') last = i + 1;
+    str[last] = 0;
+    puts(str);
+}
+int main(void) {
+    int i;
+    memset(string, 0, 144);
+    puts("   January 1970");
+    puts(" S  M Tu  W Th  F  S");
+    cal(1, 1970, string, 24);
+    for (i = 0; i < 6 * 24; i = i + 24) pstr(string + i, 24);
+    return 0;
+}
+"#,
+            None,
+            &opts,
+        )
+        .unwrap_or_else(|e| panic!("compile error: {}", e));
+        let full_asm = emit(&prog, OutputFormat::Asm)
+            .unwrap_or_else(|e| panic!("emit error: {}", e))
+            .main;
+        let rom = assemble_with_var_base(&full_asm, 16)
+            .unwrap_or_else(|e| panic!("assemble error: {}", e));
+        let mut cpu = Cpu::new();
+        let mut cycles = 0u64;
+        loop {
+            if cycles >= 50_000_000 || !cpu.step(&rom, false) {
+                break;
+            }
+            cycles += 1;
+        }
+        let ram = &cpu.ram;
+        // " S  M Tu  W Th  F  S" is the second line on screen (row 1).
+        // Row 1 = pixel rows 11..21. Col 1 has 'S' (after leading space).
+        // 'S' is at pixel x=8..15. Check if any pixel in row 1 is set.
+        let row1_has_pixels = (11..22_usize).any(|py|
+            (8..16_usize).any(|px| pixel_set(ram, px, py))
+        );
+        assert!(
+            row1_has_pixels,
+            "No pixels set in row 1 where ' S  M Tu  W Th  F  S' header should be.\nScreen:\n{}",
+            render_screen_ascii(ram)
+        );
+    }
+
+    /// Full cal.c with keyboard simulation: type "1" Enter "1970" Enter and check screen.
+    #[test]
+    fn test_cal_full_keyboard_screen() {
+        use hack_cc::output::{OutputFormat, emit};
+        use hack_cc::{CompileOptions, compile_with_full_options};
+        use std::path::PathBuf;
+        let mut opts = CompileOptions {
+            include_dirs: vec![PathBuf::from("include")],
+            ..Default::default()
+        };
+        opts.defines
+            .insert("HACK_OUTPUT_SCREEN".to_string(), "1".to_string());
+
+        let src = std::fs::read_to_string("demo/cal.c").unwrap();
+        let prog = compile_with_full_options(&src, None, &opts)
+            .unwrap_or_else(|e| panic!("compile error: {}", e));
+        let full_asm = emit(&prog, OutputFormat::Asm)
+            .unwrap_or_else(|e| panic!("emit error: {}", e))
+            .main;
+        let rom = assemble_with_var_base(&full_asm, 16)
+            .unwrap_or_else(|e| panic!("assemble error: {}", e));
+
+        // Key sequence: month=1 (Enter), year=1970 (Enter), quit=0 (Enter)
+        // Each key: press for PRESS_HOLD cycles, release for RELEASE_GAP cycles
+        // Keys are injected starting at FIRST_KEY_AT cycles, spaced KEY_SPACING apart
+        const PRESS_HOLD: u64 = 200;
+        const KEY_SPACING: u64 = 2_500_000;
+        const FIRST_KEY_AT: u64 = 2_000_000;
+        let keys: &[i16] = &[
+            b'1' as i16, 128, // month "1" + Enter
+            b'1' as i16, b'9' as i16, b'7' as i16, b'0' as i16, 128, // year "1970" + Enter
+            b'0' as i16, 128, // quit "0" + Enter
+        ];
+        let key_times: Vec<u64> = (0..keys.len() as u64)
+            .map(|i| FIRST_KEY_AT + i * KEY_SPACING)
+            .collect();
+
+        let mut cpu = Cpu::new();
+        const KBD: usize = 24576;
+        let max_cycles = FIRST_KEY_AT + keys.len() as u64 * KEY_SPACING + 5_000_000;
+
+        for cycle in 0..max_cycles {
+            if !cpu.step(&rom, false) { break; }
+            // Inject next key based on cycle count
+            let mut kbd: i16 = 0;
+            for (i, &t) in key_times.iter().enumerate() {
+                if cycle >= t && cycle < t + PRESS_HOLD {
+                    kbd = keys[i];
+                    break;
+                }
+            }
+            cpu.ram[KBD] = kbd;
+        }
+
+        let ram = &cpu.ram;
+        let screen_str = render_screen_ascii(ram);
+        // Print the first 20 text rows (220 pixel rows) for diagnosis
+        let first_220_lines: String = screen_str.lines().take(220).collect::<Vec<_>>().join("\n");
+        eprintln!("=== SCREEN (first 20 text rows) ===\n{}\n===", first_220_lines);
+        // After title (row 0), separator (row 1), prompt+month input (row 2),
+        // prompt+year input (row 3), month-year line (row 4), the header is row 5 (pixels 55..65).
+        // Allow wider search: rows 2..10 (pixels 22..110) for the header text.
+        let header_row_has_pixels = (22..110_usize).any(|py|
+            (8..180_usize).any(|px| pixel_set(ram, px, py))
+        );
+        assert!(
+            header_row_has_pixels,
+            "No pixels found for any output below row 1 (title/separator).\nMay be stuck at keyboard input.\nScreen:\n{}",
+            &screen_str[..screen_str.len().min(6000)]
+        );
+
+        // The header " S  M Tu  W Th  F  S" should be on screen somewhere.
+        // 'S' glyph at col 1 (x=8..15).  Check pixel rows 22..220 for the 'S' pattern.
+        // In any text row after the prompts.
+        let has_header_s = (22..220_usize).any(|py|
+            (8..16_usize).any(|px| pixel_set(ram, px, py))
+        );
+        assert!(
+            has_header_s,
+            "No 'S' glyph found in col 1 (x 8-15) in any text row — header may be missing.\nScreen:\n{}",
+            &screen_str[..screen_str.len().min(6000)]
+        );
+    }
+
+    /// Regression: cal.c output should include the day-of-week header line.
+    /// Uses port output (no HACK_OUTPUT_SCREEN) to verify via cpu.output.
+    #[test]
+    fn test_cal_header_printed() {
+        let (_, output) = compile_and_run_full(
+            r#"
+char string[144];
+
+void pstr(char *str, int n) {
+    int i;
+    int last;
+    for (i = 0; i < n; i++) if (str[i] == 0) str[i] = ' ';
+    last = 0;
+    for (i = 0; i < n; i++) if (str[i] != ' ') last = i + 1;
+    str[last] = 0;
+    puts(str);
+}
+
+int jan1(int yr) {
+    int y;
+    int d;
+    y = yr;
+    d = 4 + y + (y + 3) / 4;
+    if (y > 1800) {
+        d = d - (y - 1701) / 100;
+        d = d + (y - 1601) / 400;
+    }
+    if (y > 1752) d = d + 3;
+    return d % 7;
+}
+
+void cal(int m, int y, char *p, int w) {
+    int mon[13];
+    int d;
+    int i;
+    char *s;
+    mon[0]=0; mon[1]=31; mon[2]=29; mon[3]=31; mon[4]=30; mon[5]=31;
+    mon[6]=30; mon[7]=31; mon[8]=31; mon[9]=30; mon[10]=31; mon[11]=30; mon[12]=31;
+    s = p;
+    d = jan1(y);
+    switch ((jan1(y + 1) + 7 - d) % 7) {
+    case 1: mon[2] = 28; break;
+    case 2: break;
+    default: mon[9] = 19; break;
+    }
+    for (i = 1; i < m; i++) d = d + mon[i];
+    d = d % 7;
+    s = s + 3 * d;
+    for (i = 1; i <= mon[m]; i++) {
+        if (i == 3 && mon[m] == 19) { i = i + 11; mon[m] = mon[m] + 11; }
+        if (i > 9) *s = i / 10 + '0';
+        s++;
+        *s = i % 10 + '0';
+        s++;
+        *s = ' ';
+        s++;
+        if (++d == 7) { d = 0; s = p + w; p = s; }
+    }
+}
+
+int main(void) {
+    int i;
+    memset(string, 0, 144);
+    puts("   January 1970");
+    puts(" S  M Tu  W Th  F  S");
+    cal(1, 1970, string, 24);
+    for (i = 0; i < 6 * 24; i = i + 24)
+        pstr(string + i, 24);
+    return 0;
+}
+"#,
+            5_000_000,
+        );
+        assert!(
+            output.contains(" S  M Tu  W Th  F  S"),
+            "day-of-week header missing from cal output.\nActual output:\n{}",
+            output
+        );
     }
 }

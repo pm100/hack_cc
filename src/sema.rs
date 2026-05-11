@@ -261,7 +261,7 @@ fn check_calls_expr_ext(expr: &Expr, defined: &HashSet<String>, builtins: &[&str
         Expr::InitList(items) => {
             for item in items { check_calls_expr_ext(item, defined, builtins, externals)?; }
         }
-        Expr::Num(_) | Expr::Ident(_) | Expr::StringLit(_) | Expr::Sizeof(_) => {}
+        Expr::Num(_) | Expr::Ident(_) | Expr::StringLit(_) | Expr::Sizeof(_) | Expr::SizeofExpr(_) => {}
     }
     Ok(())
 }
@@ -356,10 +356,17 @@ fn collect_locals_stmt(
                     // No stack slot allocated.
                 }
                 StorageClass::None => {
-                    let size = type_size(ty, struct_defs).max(1);
+                    // For unsized arrays (e.g. `char arr[] = "hello"`), infer size from the
+                    // string literal initializer: s.len() + 1 (to include null terminator).
+                    let resolved_ty = if let (Type::Array(base, 0), Some(Expr::StringLit(s))) = (ty, init_expr) {
+                        Type::Array(base.clone(), s.len() + 1)
+                    } else {
+                        ty.clone()
+                    };
+                    let size = type_size(&resolved_ty, struct_defs).max(1);
                     let idx = *next_idx;
                     *next_idx += size;
-                    vars.insert(name.clone(), VarInfo { ty: ty.clone(), storage: VarStorage::Local(idx) });
+                    vars.insert(name.clone(), VarInfo { ty: resolved_ty, storage: VarStorage::Local(idx) });
                 }
             }
         }
@@ -468,7 +475,7 @@ fn collect_strings_expr(
         Expr::InitList(items) => {
             for item in items { collect_strings_expr(item, map, lits, counter); }
         }
-        Expr::Num(_) | Expr::Ident(_) | Expr::Sizeof(_) => {}
+        Expr::Num(_) | Expr::Ident(_) | Expr::Sizeof(_) | Expr::SizeofExpr(_) => {}
     }
 }
 
@@ -644,7 +651,7 @@ fn alpha_rename_expr(expr: &mut Expr, scopes: &[HashMap<String, String>]) {
         Expr::InitList(items) => {
             for item in items { alpha_rename_expr(item, scopes); }
         }
-        Expr::Num(_) | Expr::StringLit(_) | Expr::Sizeof(_) => {}
+        Expr::Num(_) | Expr::StringLit(_) | Expr::Sizeof(_) | Expr::SizeofExpr(_) => {}
     }
 }
 

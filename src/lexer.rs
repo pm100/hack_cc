@@ -10,7 +10,11 @@ pub struct LexError {
 
 impl LexError {
     fn new(line: u32, col: u32, msg: impl Into<String>) -> Self {
-        Self { line, col, msg: msg.into() }
+        Self {
+            line,
+            col,
+            msg: msg.into(),
+        }
     }
 }
 
@@ -114,14 +118,16 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
 
     // Precompute line-start byte offsets for O(log n) pos → (line, col).
     let line_starts: Vec<usize> = std::iter::once(0)
-        .chain(bytes.iter().enumerate().filter_map(|(i, &b)| {
-            if b == b'\n' { Some(i + 1) } else { None }
-        }))
+        .chain(bytes.iter().enumerate().filter_map(
+            |(i, &b)| {
+                if b == b'\n' { Some(i + 1) } else { None }
+            },
+        ))
         .collect();
 
     let pos_to_lc = |p: usize| -> (u32, u32) {
         let line = line_starts.partition_point(|&s| s <= p) as u32;
-        let col  = (p - line_starts[(line - 1) as usize] + 1) as u32;
+        let col = (p - line_starts[(line - 1) as usize] + 1) as u32;
         (line, col)
     };
 
@@ -176,10 +182,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     while pos < bytes.len() && matches!(bytes[pos], b'u' | b'U' | b'l' | b'L') {
                         pos += 1;
                     }
-                    let n = i32::from_str_radix(&source[hex_start..hex_end], 16).map_err(|_| {
-                        LexError::new(sl, sc, "hex literal out of range")
-                    })?;
-                    tokens.push(Token { kind: TokenKind::Number(n), line: sl, col: sc });
+                    let n = i32::from_str_radix(&source[hex_start..hex_end], 16)
+                        .map_err(|_| LexError::new(sl, sc, "hex literal out of range"))?;
+                    tokens.push(Token {
+                        kind: TokenKind::Number(n),
+                        line: sl,
+                        col: sc,
+                    });
                     continue;
                 }
                 // Decimal literal
@@ -191,10 +200,14 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 while pos < bytes.len() && matches!(bytes[pos], b'u' | b'U' | b'l' | b'L') {
                     pos += 1;
                 }
-                let n: i32 = source[start..digit_end].parse().map_err(|_| {
-                    LexError::new(sl, sc, "integer literal out of range")
-                })?;
-                tokens.push(Token { kind: TokenKind::Number(n), line: sl, col: sc });
+                let n: i32 = source[start..digit_end]
+                    .parse()
+                    .map_err(|_| LexError::new(sl, sc, "integer literal out of range"))?;
+                tokens.push(Token {
+                    kind: TokenKind::Number(n),
+                    line: sl,
+                    col: sc,
+                });
                 continue;
             }
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
@@ -205,46 +218,53 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 }
                 let word = &source[start..pos];
                 let kind = match word {
-                    "int"    => TokenKind::KwInt,
-                    "char"   => TokenKind::KwChar,
-                    "void"   => TokenKind::KwVoid,
+                    "int" => TokenKind::KwInt,
+                    "char" => TokenKind::KwChar,
+                    "void" => TokenKind::KwVoid,
                     "return" => TokenKind::KwReturn,
-                    "if"     => TokenKind::KwIf,
-                    "else"   => TokenKind::KwElse,
-                    "while"  => TokenKind::KwWhile,
-                    "for"    => TokenKind::KwFor,
-                    "sizeof"    => TokenKind::KwSizeof,
-                    "struct"    => TokenKind::KwStruct,
-                    "do"        => TokenKind::KwDo,
-                    "break"     => TokenKind::KwBreak,
-                    "continue"  => TokenKind::KwContinue,
-                    "switch"    => TokenKind::KwSwitch,
-                    "case"      => TokenKind::KwCase,
-                    "default"   => TokenKind::KwDefault,
-                    "typedef"   => TokenKind::KwTypedef,
-                    "enum"      => TokenKind::KwEnum,
-                    "unsigned"  => TokenKind::KwUnsigned,
-                    "long"      => TokenKind::KwLong,
-                    "short"     => TokenKind::KwShort,
-                    "const"     => TokenKind::KwConst,
-                    "extern"    => TokenKind::KwExtern,
-                    "static"    => TokenKind::KwStatic,
-                    "signed"    => TokenKind::KwSigned,
-                    "goto"      => TokenKind::KwGoto,
-                    _           => TokenKind::Ident(word.to_string()),
+                    "if" => TokenKind::KwIf,
+                    "else" => TokenKind::KwElse,
+                    "while" => TokenKind::KwWhile,
+                    "for" => TokenKind::KwFor,
+                    "sizeof" => TokenKind::KwSizeof,
+                    "struct" => TokenKind::KwStruct,
+                    "do" => TokenKind::KwDo,
+                    "break" => TokenKind::KwBreak,
+                    "continue" => TokenKind::KwContinue,
+                    "switch" => TokenKind::KwSwitch,
+                    "case" => TokenKind::KwCase,
+                    "default" => TokenKind::KwDefault,
+                    "typedef" => TokenKind::KwTypedef,
+                    "enum" => TokenKind::KwEnum,
+                    "unsigned" => TokenKind::KwUnsigned,
+                    "long" => TokenKind::KwLong,
+                    "short" => TokenKind::KwShort,
+                    "const" => TokenKind::KwConst,
+                    "extern" => TokenKind::KwExtern,
+                    "static" => TokenKind::KwStatic,
+                    "signed" => TokenKind::KwSigned,
+                    "goto" => TokenKind::KwGoto,
+                    _ => TokenKind::Ident(word.to_string()),
                 };
-                tokens.push(Token { kind, line: sl, col: sc });
+                tokens.push(Token {
+                    kind,
+                    line: sl,
+                    col: sc,
+                });
                 continue;
             }
             b'\'' => {
                 pos += 1;
-                let ch = lex_char_escape(bytes, &mut pos)
-                    .map_err(|e| LexError::new(sl, sc, e))?;
+                let ch = lex_char_escape(bytes, &mut pos).map_err(|e| LexError::new(sl, sc, e))?;
                 if pos >= bytes.len() || bytes[pos] != b'\'' {
                     return Err(LexError::new(sl, sc, "unterminated char literal"));
                 }
                 pos += 1;
-                tokens.push(Token { kind: TokenKind::CharLit(ch), line: sl, col: sc });
+                tokens.push(Token {
+                    kind: TokenKind::CharLit(ch),
+                    line: sl,
+                    col: sc,
+                });
                 continue;
             }
             b'"' => {
@@ -254,111 +274,234 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     if pos >= bytes.len() {
                         return Err(LexError::new(sl, sc, "unterminated string literal"));
                     }
-                    if bytes[pos] == b'"' { pos += 1; break; }
-                    let ch = lex_char_escape(bytes, &mut pos)
-                        .map_err(|e| LexError::new(sl, sc, e))?;
+                    if bytes[pos] == b'"' {
+                        pos += 1;
+                        break;
+                    }
+                    let ch =
+                        lex_char_escape(bytes, &mut pos).map_err(|e| LexError::new(sl, sc, e))?;
                     s.push(ch as u8 as char);
                 }
-                tokens.push(Token { kind: TokenKind::StringLit(s), line: sl, col: sc });
+                s.push('\0');
+                tokens.push(Token {
+                    kind: TokenKind::StringLit(s),
+                    line: sl,
+                    col: sc,
+                });
                 continue;
             }
-            b'(' => { pos += 1; TokenKind::LParen }
-            b')' => { pos += 1; TokenKind::RParen }
-            b'{' => { pos += 1; TokenKind::LBrace }
-            b'}' => { pos += 1; TokenKind::RBrace }
-            b'[' => { pos += 1; TokenKind::LBracket }
-            b']' => { pos += 1; TokenKind::RBracket }
-            b';' => { pos += 1; TokenKind::Semicolon }
-            b',' => { pos += 1; TokenKind::Comma }
+            b'(' => {
+                pos += 1;
+                TokenKind::LParen
+            }
+            b')' => {
+                pos += 1;
+                TokenKind::RParen
+            }
+            b'{' => {
+                pos += 1;
+                TokenKind::LBrace
+            }
+            b'}' => {
+                pos += 1;
+                TokenKind::RBrace
+            }
+            b'[' => {
+                pos += 1;
+                TokenKind::LBracket
+            }
+            b']' => {
+                pos += 1;
+                TokenKind::RBracket
+            }
+            b';' => {
+                pos += 1;
+                TokenKind::Semicolon
+            }
+            b',' => {
+                pos += 1;
+                TokenKind::Comma
+            }
             b'.' => {
-                if pos + 2 < bytes.len() && bytes[pos+1] == b'.' && bytes[pos+2] == b'.' {
-                    pos += 3; TokenKind::DotDotDot
+                if pos + 2 < bytes.len() && bytes[pos + 1] == b'.' && bytes[pos + 2] == b'.' {
+                    pos += 3;
+                    TokenKind::DotDotDot
                 } else {
-                    pos += 1; TokenKind::Dot
+                    pos += 1;
+                    TokenKind::Dot
                 }
             }
-            b'~' => { pos += 1; TokenKind::Tilde }
+            b'~' => {
+                pos += 1;
+                TokenKind::Tilde
+            }
             b'^' => {
                 pos += 1;
-                if pos < bytes.len() && bytes[pos] == b'=' { pos += 1; TokenKind::CaretAssign }
-                else { TokenKind::Caret }
+                if pos < bytes.len() && bytes[pos] == b'=' {
+                    pos += 1;
+                    TokenKind::CaretAssign
+                } else {
+                    TokenKind::Caret
+                }
             }
-            b'?' => { pos += 1; TokenKind::Question }
-            b':' => { pos += 1; TokenKind::Colon }
+            b'?' => {
+                pos += 1;
+                TokenKind::Question
+            }
+            b':' => {
+                pos += 1;
+                TokenKind::Colon
+            }
             b'+' => {
                 pos += 1;
-                if pos < bytes.len() && bytes[pos] == b'=' { pos += 1; TokenKind::PlusAssign }
-                else if pos < bytes.len() && bytes[pos] == b'+' { pos += 1; TokenKind::PlusPlus }
-                else { TokenKind::Plus }
+                if pos < bytes.len() && bytes[pos] == b'=' {
+                    pos += 1;
+                    TokenKind::PlusAssign
+                } else if pos < bytes.len() && bytes[pos] == b'+' {
+                    pos += 1;
+                    TokenKind::PlusPlus
+                } else {
+                    TokenKind::Plus
+                }
             }
             b'-' => {
                 pos += 1;
-                if pos < bytes.len() && bytes[pos] == b'=' { pos += 1; TokenKind::MinusAssign }
-                else if pos < bytes.len() && bytes[pos] == b'-' { pos += 1; TokenKind::MinusMinus }
-                else if pos < bytes.len() && bytes[pos] == b'>' { pos += 1; TokenKind::Arrow }
-                else { TokenKind::Minus }
+                if pos < bytes.len() && bytes[pos] == b'=' {
+                    pos += 1;
+                    TokenKind::MinusAssign
+                } else if pos < bytes.len() && bytes[pos] == b'-' {
+                    pos += 1;
+                    TokenKind::MinusMinus
+                } else if pos < bytes.len() && bytes[pos] == b'>' {
+                    pos += 1;
+                    TokenKind::Arrow
+                } else {
+                    TokenKind::Minus
+                }
             }
             b'*' => {
                 pos += 1;
-                if pos < bytes.len() && bytes[pos] == b'=' { pos += 1; TokenKind::StarAssign }
-                else { TokenKind::Star }
+                if pos < bytes.len() && bytes[pos] == b'=' {
+                    pos += 1;
+                    TokenKind::StarAssign
+                } else {
+                    TokenKind::Star
+                }
             }
             b'/' => {
                 pos += 1;
-                if pos < bytes.len() && bytes[pos] == b'=' { pos += 1; TokenKind::SlashAssign }
-                else { TokenKind::Slash }
+                if pos < bytes.len() && bytes[pos] == b'=' {
+                    pos += 1;
+                    TokenKind::SlashAssign
+                } else {
+                    TokenKind::Slash
+                }
             }
             b'%' => {
                 pos += 1;
-                if pos < bytes.len() && bytes[pos] == b'=' { pos += 1; TokenKind::PercentAssign }
-                else { TokenKind::Percent }
+                if pos < bytes.len() && bytes[pos] == b'=' {
+                    pos += 1;
+                    TokenKind::PercentAssign
+                } else {
+                    TokenKind::Percent
+                }
             }
             b'&' => {
                 pos += 1;
-                if pos < bytes.len() && bytes[pos] == b'&' { pos += 1; TokenKind::AmpAmp }
-                else if pos < bytes.len() && bytes[pos] == b'=' { pos += 1; TokenKind::AmpAssign }
-                else { TokenKind::Amp }
+                if pos < bytes.len() && bytes[pos] == b'&' {
+                    pos += 1;
+                    TokenKind::AmpAmp
+                } else if pos < bytes.len() && bytes[pos] == b'=' {
+                    pos += 1;
+                    TokenKind::AmpAssign
+                } else {
+                    TokenKind::Amp
+                }
             }
             b'|' => {
                 pos += 1;
-                if pos < bytes.len() && bytes[pos] == b'|' { pos += 1; TokenKind::PipePipe }
-                else if pos < bytes.len() && bytes[pos] == b'=' { pos += 1; TokenKind::PipeAssign }
-                else { TokenKind::Pipe }
+                if pos < bytes.len() && bytes[pos] == b'|' {
+                    pos += 1;
+                    TokenKind::PipePipe
+                } else if pos < bytes.len() && bytes[pos] == b'=' {
+                    pos += 1;
+                    TokenKind::PipeAssign
+                } else {
+                    TokenKind::Pipe
+                }
             }
             b'!' => {
                 pos += 1;
-                if pos < bytes.len() && bytes[pos] == b'=' { pos += 1; TokenKind::Ne }
-                else { TokenKind::Bang }
+                if pos < bytes.len() && bytes[pos] == b'=' {
+                    pos += 1;
+                    TokenKind::Ne
+                } else {
+                    TokenKind::Bang
+                }
             }
             b'=' => {
                 pos += 1;
-                if pos < bytes.len() && bytes[pos] == b'=' { pos += 1; TokenKind::Eq }
-                else { TokenKind::Assign }
+                if pos < bytes.len() && bytes[pos] == b'=' {
+                    pos += 1;
+                    TokenKind::Eq
+                } else {
+                    TokenKind::Assign
+                }
             }
             b'<' => {
                 pos += 1;
                 if pos < bytes.len() && bytes[pos] == b'<' {
                     pos += 1;
-                    if pos < bytes.len() && bytes[pos] == b'=' { pos += 1; TokenKind::LtLtAssign }
-                    else { TokenKind::LtLt }
-                } else if pos < bytes.len() && bytes[pos] == b'=' { pos += 1; TokenKind::Le }
-                else { TokenKind::Lt }
+                    if pos < bytes.len() && bytes[pos] == b'=' {
+                        pos += 1;
+                        TokenKind::LtLtAssign
+                    } else {
+                        TokenKind::LtLt
+                    }
+                } else if pos < bytes.len() && bytes[pos] == b'=' {
+                    pos += 1;
+                    TokenKind::Le
+                } else {
+                    TokenKind::Lt
+                }
             }
             b'>' => {
                 pos += 1;
                 if pos < bytes.len() && bytes[pos] == b'>' {
                     pos += 1;
-                    if pos < bytes.len() && bytes[pos] == b'=' { pos += 1; TokenKind::GtGtAssign }
-                    else { TokenKind::GtGt }
-                } else if pos < bytes.len() && bytes[pos] == b'=' { pos += 1; TokenKind::Ge }
-                else { TokenKind::Gt }
+                    if pos < bytes.len() && bytes[pos] == b'=' {
+                        pos += 1;
+                        TokenKind::GtGtAssign
+                    } else {
+                        TokenKind::GtGt
+                    }
+                } else if pos < bytes.len() && bytes[pos] == b'=' {
+                    pos += 1;
+                    TokenKind::Ge
+                } else {
+                    TokenKind::Gt
+                }
             }
-            c => return Err(LexError::new(sl, sc, format!("unexpected character '{}'", c as char))),
+            c => {
+                return Err(LexError::new(
+                    sl,
+                    sc,
+                    format!("unexpected character '{}'", c as char),
+                ));
+            }
         };
-        tokens.push(Token { kind, line: sl, col: sc });
+        tokens.push(Token {
+            kind,
+            line: sl,
+            col: sc,
+        });
     }
     let (el, ec) = pos_to_lc(pos);
-    tokens.push(Token { kind: TokenKind::Eof, line: el, col: ec });
+    tokens.push(Token {
+        kind: TokenKind::Eof,
+        line: el,
+        col: ec,
+    });
     Ok(tokens)
 }
 
@@ -382,17 +525,17 @@ fn lex_char_escape(bytes: &[u8], pos: &mut usize) -> Result<i16, String> {
     let esc = bytes[*pos];
     *pos += 1;
     Ok(match esc {
-        b'n'  => 10,
-        b't'  => 9,
-        b'r'  => 13,
-        b'0'  => 0,
-        b'\\'  => 92,
+        b'n' => 10,
+        b't' => 9,
+        b'r' => 13,
+        b'0' => 0,
+        b'\\' => 92,
         b'\'' => 39,
-        b'"'  => 34,
-        b'a'  => 7,
-        b'b'  => 8,
-        b'f'  => 12,
-        b'v'  => 11,
+        b'"' => 34,
+        b'a' => 7,
+        b'b' => 8,
+        b'f' => 12,
+        b'v' => 11,
         c => return Err(format!("unknown escape sequence '\\{}'", c as char)),
     })
 }

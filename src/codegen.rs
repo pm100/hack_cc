@@ -714,6 +714,7 @@ impl Gen {
             }
             Expr::StringLit(_) => Some(Type::Ptr(Box::new(Type::Char))),
             Expr::Sizeof(_) => Some(Type::Int),
+            Expr::SizeofExpr(_) => Some(Type::Int),
             Expr::Ident(name) => vars.get(name).map(|v| v.ty.clone()),
             Expr::UnOp(UnOp::Deref, inner) => match self.expr_type(inner, vars)? {
                 Type::Ptr(t) => Some(*t),
@@ -803,6 +804,14 @@ impl Gen {
 
             Expr::Sizeof(ty) => {
                 let sz = self.type_size(ty).max(1) as i32;
+                self.emit(&format!("@{}", sz));
+                self.emit("D=A");
+                self.push_d();
+            }
+
+            Expr::SizeofExpr(inner) => {
+                let ty = self.expr_type(inner, vars).unwrap_or(Type::Int);
+                let sz = self.type_size(&ty).max(1) as i32;
                 self.emit(&format!("@{}", sz));
                 self.emit("D=A");
                 self.push_d();
@@ -2144,7 +2153,65 @@ impl Gen {
                     let info = vars.get(name).ok_or_else(|| {
                         CodegenError::new(format!("undefined local '{}'", name))
                     })?.clone();
-                    if let Expr::InitList(items) = init_expr {
+                    // Special case: char arr[N] = "string literal" — copy bytes into slots.
+                    if let (Expr::StringLit(s), Type::Array(_, arr_len)) = (init_expr, &info.ty.clone()) {
+                        let bytes: Vec<i16> = s.bytes().map(|b| b as i16).chain(std::iter::once(0)).collect();
+                        let n = (*arr_len).min(bytes.len());
+                        for i in 0..n {
+                            let ch = bytes[i];
+                            if ch == 0 {
+                                self.emit("D=0");
+                            } else {
+                                self.emit(&format!("@{}", ch));
+                                self.emit("D=A");
+                            }
+                            self.emit("@R13");
+                            self.emit("M=D");
+                            match &info.storage {
+                                VarStorage::Local(base) => {
+                                    let idx = base + i;
+                                    self.emit("@LCL");
+                                    self.emit("D=M");
+                                    if idx > 0 {
+                                        self.emit(&format!("@{}", idx));
+                                        self.emit("D=D+A");
+                                    }
+                                    self.emit("@R14");
+                                    self.emit("M=D");
+                                    self.emit("@R13");
+                                    self.emit("D=M");
+                                    self.emit("@R14");
+                                    self.emit("A=M");
+                                    self.emit("M=D");
+                                }
+                                VarStorage::Global(sym) => {
+                                    let elem_sym = if i == 0 {
+                                        sym.clone()
+                                    } else {
+                                        format!("{}_{}", sym, i)
+                                    };
+                                    self.emit(&format!("@{}", elem_sym));
+                                    self.emit("M=D");
+                                }
+                                VarStorage::Param(base) => {
+                                    let idx = base + i;
+                                    self.emit("@ARG");
+                                    self.emit("D=M");
+                                    if idx > 0 {
+                                        self.emit(&format!("@{}", idx));
+                                        self.emit("D=D+A");
+                                    }
+                                    self.emit("@R14");
+                                    self.emit("M=D");
+                                    self.emit("@R13");
+                                    self.emit("D=M");
+                                    self.emit("@R14");
+                                    self.emit("A=M");
+                                    self.emit("M=D");
+                                }
+                            }
+                        }
+                    } else if let Expr::InitList(items) = init_expr {
                         for (i, item) in items.iter().enumerate() {
                             self.gen_expr(item, vars)?;
                             self.pop_d();
@@ -2700,10 +2767,12 @@ pub fn gen_font_data_inits() -> Vec<DataInit> {
 /// calls `main`, and halts.  `init_code` is inserted between the SP
 /// initialization and the call to `main` — use it to initialize global
 /// variables and string literals.
-pub fn gen_bootstrap(init_code: &str) -> String {
+/// `sp_base` is the initial stack pointer value; pass `max(256, 16 + data_words + margin)`
+/// so the stack does not collide with the data segment.
+pub fn gen_bootstrap(init_code: &str, sp_base: u16) -> String {
     let mut lines: Vec<String> = Vec::new();
     lines.push("// Bootstrap".to_string());
-    lines.push("@256".to_string());
+    lines.push(format!("@{}", sp_base));
     lines.push("D=A".to_string());
     lines.push("@SP".to_string());
     lines.push("M=D".to_string());
@@ -2761,8 +2830,17 @@ fn generate_inner(sema: SemaResult, body_only: bool) -> Result<CompiledProgram, 
     let mut g = Gen::new(sema.string_map.clone(), sema.struct_defs.clone(), true, sema.func_return_types.clone());
 
     if !body_only {
+        // Compute SP so it starts above all data (string literals + globals) plus a
+        // margin for runtime scratch variables allocated by the linker-appended library code.
+        let total_data_words: usize = sema.string_literals.iter()
+            .map(|(_, chars)| chars.len() + 1) // chars + NUL terminator
+            .sum::<usize>()
+            + sema.globals.iter()
+                .map(|(_, ty, _)| type_size(ty, &sema.struct_defs).max(1))
+                .sum::<usize>();
+        let sp_base = std::cmp::max(256usize, 16 + total_data_words + 64) as u16;
         g.emit("// Bootstrap");
-        g.emit("@256");
+        g.emit(&format!("@{}", sp_base));
         g.emit("D=A");
         g.emit("@SP");
         g.emit("M=D");

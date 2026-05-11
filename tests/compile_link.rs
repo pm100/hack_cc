@@ -66,7 +66,32 @@ fn link_to_hackem(s_files: &[&Path], name: &str) -> PathBuf {
     out_path
 }
 
-/// Compile a C source string to a `.asm` whole-program output via `hack_cc`.
+/// Link `.s` files to a `.hack` output via `hack_ld`.
+fn link_to_hack(s_files: &[&Path], name: &str) -> PathBuf {
+    let hack_ld = env!("CARGO_BIN_EXE_hack_ld");
+    let out_path = tmp_dir().join(format!("{}.hack", name));
+    let mut cmd = Command::new(hack_ld);
+    for s in s_files { cmd.arg(s); }
+    cmd.arg("-o").arg(&out_path);
+    let status = cmd.status().unwrap_or_else(|e| panic!("failed to run hack_ld: {}", e));
+    assert!(status.success(), "hack_ld failed for '{}'", name);
+    out_path
+}
+
+/// Link `.s` files to a `.tst` output via `hack_ld`.
+/// Returns the path to the `.tst` file; the companion `prog.hack` is placed
+/// in the same directory.
+fn link_to_tst(s_files: &[&Path], name: &str) -> PathBuf {
+    let hack_ld = env!("CARGO_BIN_EXE_hack_ld");
+    let out_path = tmp_dir().join(format!("{}.tst", name));
+    let mut cmd = Command::new(hack_ld);
+    for s in s_files { cmd.arg(s); }
+    cmd.arg("-o").arg(&out_path);
+    let status = cmd.status().unwrap_or_else(|e| panic!("failed to run hack_ld: {}", e));
+    assert!(status.success(), "hack_ld failed for '{}'", name);
+    // The companion .hack binary is emitted alongside as `prog.hack`
+    out_path
+}
 fn compile_whole(src: &str, name: &str) -> PathBuf {
     let hack_cc = env!("CARGO_BIN_EXE_hack_cc");
     let dir = tmp_dir();
@@ -1329,4 +1354,87 @@ int main(void) {
     let asm = compile_whole(src, "tbsc");
     let (code, _) = run(&asm);
     assert_eq!(code, 7);
+}
+
+// ── All-format tests: .asm, .hackem, .hack, .tst ─────────────────────────────
+
+/// Compile + link to .hack format and run — return value test.
+#[test]
+fn test_format_hack_return_value() {
+    let s = compile_to_s("int main() { return 55; }", "fmt_hack_ret");
+    let hack = link_to_hack(&[&s], "fmt_hack_ret");
+    let (code, _) = run(&hack);
+    assert_eq!(code, 55);
+}
+
+/// Compile + link to .hackem format and run — return value test.
+#[test]
+fn test_format_hackem_return_value() {
+    let s = compile_to_s("int main() { return 33; }", "fmt_hackem_ret");
+    let hackem = link_to_hackem(&[&s], "fmt_hackem_ret");
+    let (code, _) = run(&hackem);
+    assert_eq!(code, 33);
+}
+
+/// Compile + link to .tst format and run — return value test.
+#[test]
+fn test_format_tst_return_value() {
+    let s = compile_to_s("int main() { return 99; }", "fmt_tst_ret");
+    let tst = link_to_tst(&[&s], "fmt_tst_ret");
+    let (code, _) = run(&tst);
+    assert_eq!(code, 99);
+}
+
+/// Compile + link to .hack format and run — putchar output test.
+#[test]
+fn test_format_hack_putchar() {
+    let src = "#include <hack.h>\nint main() { putchar('Z'); return 0; }";
+    let s = compile_to_s(src, "fmt_hack_pc");
+    let hack = link_to_hack(&[&s], "fmt_hack_pc");
+    let (code, out) = run(&hack);
+    assert_eq!(code, 0);
+    assert_eq!(out, "Z");
+}
+
+/// Compile + link to .hackem format and run — putchar output test.
+#[test]
+fn test_format_hackem_putchar() {
+    let src = "#include <hack.h>\nint main() { putchar('Q'); return 0; }";
+    let s = compile_to_s(src, "fmt_hackem_pc");
+    let hackem = link_to_hackem(&[&s], "fmt_hackem_pc");
+    let (code, out) = run(&hackem);
+    assert_eq!(code, 0);
+    assert_eq!(out, "Q");
+}
+
+/// Whole-program compile to .hack format and run.
+#[test]
+fn test_whole_program_hack_format() {
+    let hack_cc = env!("CARGO_BIN_EXE_hack_cc");
+    let dir = tmp_dir();
+    let c_path = dir.join("wp_hack.c");
+    let hack_path = dir.join("wp_hack.hack");
+    fs::write(&c_path, "int main() { return 17; }").unwrap();
+    let status = Command::new(hack_cc)
+        .args([c_path.to_str().unwrap(), "-I", INCLUDE_DIR, "-o", hack_path.to_str().unwrap()])
+        .status().unwrap();
+    assert!(status.success(), "hack_cc failed for wp_hack");
+    let (code, _) = run(&hack_path);
+    assert_eq!(code, 17);
+}
+
+/// Whole-program compile to .tst format and run.
+#[test]
+fn test_whole_program_tst_format() {
+    let hack_cc = env!("CARGO_BIN_EXE_hack_cc");
+    let dir = tmp_dir();
+    let c_path = dir.join("wp_tst.c");
+    let tst_path = dir.join("wp_tst.tst");
+    fs::write(&c_path, "int main() { return 23; }").unwrap();
+    let status = Command::new(hack_cc)
+        .args([c_path.to_str().unwrap(), "-I", INCLUDE_DIR, "-o", tst_path.to_str().unwrap()])
+        .status().unwrap();
+    assert!(status.success(), "hack_cc failed for wp_tst");
+    let (code, _) = run(&tst_path);
+    assert_eq!(code, 23);
 }
