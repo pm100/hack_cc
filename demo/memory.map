@@ -1,0 +1,41 @@
+=== hack_cc Memory Map ===
+
+ROM: 1915 instructions  (0x0000..0x077a)
+
+Bootstrap:
+  (startup / call main)                0x0000(    0)     16
+  __ld_main_ret                        0x0010(   16)      2
+
+User code:
+  [memory.c]
+    fill_array                         0x0012(   18)    209
+    sum_array                          0x00e3(  227)    263
+    main                               0x01ea(  490)    951
+
+Runtime library:
+  __vm_call                            0x05a1( 1441)     48
+  __vm_return                          0x05d1( 1489)     43
+  free                                 0x05fc( 1532)     41
+  itoa                                 0x0625( 1573)     26
+  malloc                               0x063f( 1599)     62
+  puts                                 0x067d( 1661)     19
+  __alloc                              0x0690( 1680)     25
+  __itoa                               0x06a9( 1705)    126
+  __puts                               0x0727( 1831)     18
+  __div                                0x0739( 1849)     66
+
+RAM: stack base 256  (0x0100)
+
+Data segment  (16..71  56 words):
+  __str_0                              0x0010(   16)     30
+  __str_1                              0x002e(   46)     26
+
+Stack  (1792 words available):
+  base (SP)                            0x0100(  256)
+  ceiling                              0x0800( 2048)  (heap base)
+
+Heap  (13279 words available):
+  base                                 0x0800( 2048)
+  RAM[15327]                           0x3bdf(15327)  (bump pointer)
+  ceiling                              0x3bde(15326)
+

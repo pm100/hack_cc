@@ -143,6 +143,11 @@ fn main() {
         }
     }
 
+    // Extract short names for .source markers and map file.
+    let input_names: Vec<String> = cli.inputs.iter()
+        .map(|p| p.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string())
+        .collect();
+
     // ── Step 3: Build combined ASM with bootstrap ───────────────────────────
     let sp_base = std::cmp::max(256u32, 16 + combined_data.len() as u32 + 64) as u16;
 
@@ -164,8 +169,9 @@ fn main() {
         };
         let bootstrap = gen_bootstrap(&full_init, sp_base);
         let mut combined = bootstrap;
-        for sf in &parsed {
+        for (name, sf) in input_names.iter().zip(parsed.iter()) {
             combined.push('\n');
+            combined.push_str(&format!("// .source {}\n", name));
             combined.push_str(&sf.asm_text);
         }
         combined
@@ -242,7 +248,8 @@ fn main() {
     }
 
     if cli.map {
-        let map_text = hack_cc::mapfile::generate_map(&prog.asm);
+        let source_name_refs: Vec<&str> = input_names.iter().map(String::as_str).collect();
+        let map_text = hack_cc::mapfile::generate_map(&prog.asm, &source_name_refs, &prog.data);
         let map_path = out_path.with_extension("map");
         std::fs::write(&map_path, &map_text).unwrap_or_else(|e| {
             eprintln!("error writing map {:?}: {}", map_path, e);

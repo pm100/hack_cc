@@ -390,12 +390,11 @@ pub fn compile_and_link(
 }
 
 
-/// Convert symbolic name-value pairs into Hack assembly init instructions.
-/// For `Hackem`/`Tst` formats: emit just `@name` per entry so the assembler
-/// allocates RAM slots in the correct order, but no store instructions —
+/// For `Hackem`/`Tst` formats: emit `.alloc name` per entry so the assembler
+/// reserves RAM slots in the correct order but emits zero ROM instructions —
 /// values will be pre-loaded via `RAM@` sections instead.
 fn gen_data_addr_reservations(entries: &[(String, i16)]) -> String {
-    entries.iter().map(|(name, _)| format!("@{}\n", name)).collect()
+    entries.iter().map(|(name, _)| format!(".alloc {}\n", name)).collect()
 }
 
 fn gen_data_init_code(entries: &[(String, i16)]) -> String {

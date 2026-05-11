@@ -1,12 +1,16 @@
 /// Map-file generator: produces a human-readable report of the ROM/RAM layout
 /// produced by the compiler and linker.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use crate::assembler;
+use crate::codegen::DataInit;
 
 /// Generate a map report from the final linked assembly text.
-/// Returns the formatted report as a string.
-pub fn generate_map(asm: &str) -> String {
+///
+/// `user_source_names`: file names of the user source files (e.g. `["cal.c"]`),
+/// used as a fallback label when no `// .source` markers are embedded in the asm.
+/// `prog_data`: the `CompiledProgram::data` field, used to detect the font table.
+pub fn generate_map(asm: &str, user_source_names: &[&str], prog_data: &[DataInit]) -> String {
     let result = match assembler::assemble_with_symbols(asm, 16) {
         Ok(r) => r,
         Err(e) => return format!("// map generation failed: {}\n", e),
@@ -15,103 +19,166 @@ pub fn generate_map(asm: &str) -> String {
     let mut out = String::new();
     out.push_str("=== hack_cc Memory Map ===\n\n");
 
-    // ── ROM section ──────────────────────────────────────────────────────────
     let total_rom = result.words.len();
     out.push_str(&format!(
-        "ROM: {} instructions  (0x0000 – 0x{:04x})\n\n",
+        "ROM: {} instructions  (0x0000..0x{:04x})\n\n",
         total_rom,
         total_rom.saturating_sub(1)
     ));
 
-    // Symbols provided by library modules (from .provides directives in linked asm)
-    let provided: HashSet<String> = asm
+    // ── Split at the .library_section marker ─────────────────────────────────
+    let (user_asm, lib_asm) = split_library(asm);
+
+    // Library-provided symbols (from lib/ .s modules appended by the linker)
+    let lib_provided: std::collections::HashSet<String> = lib_asm
         .lines()
         .filter_map(|l| l.trim().strip_prefix(".provides "))
         .flat_map(|rest| rest.split_whitespace().map(String::from))
         .collect();
 
-    // Categorise ROM labels
-    let mut bootstrap:  Vec<(&str, u16)> = Vec::new();
-    let mut user_fns:   Vec<(&str, u16)> = Vec::new();
-    let mut lib_fns:    Vec<(&str, u16)> = Vec::new();
-    let mut internals:  Vec<(&str, u16)> = Vec::new();
+    // User modules: per-source-file symbol list
+    let user_modules = parse_user_modules(user_asm, user_source_names);
+    let user_sym_set: std::collections::HashSet<String> = user_modules.iter()
+        .flat_map(|(_, syms)| syms.iter().cloned())
+        .collect();
 
-    for (name, addr) in &result.rom_labels {
+    // ── Displayed ROM labels: only entry points of interest, deduped by addr ──
+    // Build a set of "interesting" names: bootstrap + user symbols + lib symbols.
+    // This avoids compiler-internal control-flow labels (e.g. __while_top_N)
+    // clobbering real function entry points that share the same address.
+    let bootstrap_names: std::collections::HashSet<&str> = result.rom_labels.iter()
+        .filter(|(n, _)| n == "Bootstrap" || n.starts_with("__ld_") || n == "__end")
+        .map(|(n, _)| n.as_str())
+        .collect();
+    let interesting: std::collections::HashSet<&str> = bootstrap_names.iter().copied()
+        .chain(user_sym_set.iter().map(String::as_str))
+        .chain(lib_provided.iter().map(String::as_str))
+        .collect();
+
+    // rom_labels is sorted by address; keep only interesting names, dedup by addr.
+    let displayed: Vec<(String, u16)> = {
+        let mut v: Vec<(String, u16)> = Vec::new();
+        for (name, addr) in &result.rom_labels {
+            if !interesting.contains(name.as_str()) { continue; }
+            if v.last().map(|(_, a)| *a) == Some(*addr) { continue; }
+            v.push((name.clone(), *addr));
+        }
+        v
+    };
+
+    // ROM lengths: addr → number of instructions until next displayed label
+    let rom_lengths: HashMap<u16, u16> = {
+        let mut m = HashMap::new();
+        for i in 0..displayed.len() {
+            let addr = displayed[i].1;
+            let next = if i + 1 < displayed.len() { displayed[i + 1].1 } else { total_rom as u16 };
+            m.insert(addr, next - addr);
+        }
+        m
+    };
+
+    // Address lookup: use all rom_labels so every user/lib symbol resolves.
+    let fn_addr: HashMap<&str, u16> = result.rom_labels.iter()
+        .map(|(n, a)| (n.as_str(), *a))
+        .collect();
+
+    // ── Categorize into bootstrap / user / library ────────────────────────────
+    let mut bootstrap: Vec<(&str, u16)> = Vec::new();
+    let mut lib_fns:   Vec<(&str, u16)> = Vec::new();
+
+    for (name, addr) in &displayed {
         let addr = *addr;
         if name == "Bootstrap" || name.starts_with("__ld_") || name == "__end" {
             bootstrap.push((name, addr));
-        } else if provided.contains(name.as_str()) {
-            // Public symbol exported by a library module
+        } else if lib_provided.contains(name.as_str()) {
             lib_fns.push((name, addr));
-        } else if !name.starts_with("__")
-               && !name.starts_with("L_")
-               && !name.contains('$') {
-            // Looks like a user-defined function entry point
-            user_fns.push((name, addr));
-        } else {
-            internals.push((name, addr));
         }
+        // user fns rendered via user_modules below
     }
 
-    let emit_section = |out: &mut String, header: &str, entries: &[(&str, u16)]| {
-        if entries.is_empty() { return; }
-        out.push_str(&format!("  [{}]\n", header));
-        for (name, addr) in entries {
-            out.push_str(&format!("    {:<36} ROM[{:5}]  0x{:04x}\n", name, addr, addr));
+    // Inline helper: format one ROM entry line.
+    // Address column always starts at position 38 (indent + name padded to 38-indent).
+    macro_rules! rom_line {
+        ($indent:expr, $name:expr, $addr:expr) => {{
+            let name_w = 38usize.saturating_sub($indent);
+            let len = rom_lengths.get(&$addr).copied().unwrap_or(0);
+            format!("{}{:<width$} 0x{:04x}({:>5})  {:>5}\n",
+                " ".repeat($indent), $name, $addr, $addr, len, width = name_w)
+        }};
+    }
+
+    // ── Bootstrap ────────────────────────────────────────────────────────────
+    if !bootstrap.is_empty() {
+        out.push_str("Bootstrap:\n");
+        // Startup preamble occupies ROM[0] up to the first bootstrap label.
+        let first_boot = bootstrap.iter().map(|(_, a)| *a).min().unwrap_or(0);
+        if first_boot > 0 {
+            out.push_str(&format!("  {:<36} 0x{:04x}({:>5})  {:>5}\n",
+                "(startup / call main)", 0u16, 0u16, first_boot));
+        }
+        for (name, addr) in &bootstrap {
+            out.push_str(&rom_line!(2, *name, *addr));
         }
         out.push('\n');
-    };
+    }
 
-    emit_section(&mut out, "Bootstrap",        &bootstrap);
-    emit_section(&mut out, "User functions",   &user_fns);
-    emit_section(&mut out, "Library",          &lib_fns);
-    // Internal jump labels ($if_*, $while_*, __vm_*) are omitted – too numerous.
+    // ── User code (grouped by source file) ───────────────────────────────────
+    if !user_modules.is_empty() {
+        out.push_str("User code:\n");
+        for (src_name, syms) in &user_modules {
+            out.push_str(&format!("  [{}]\n", src_name));
+            let mut sym_addrs: Vec<(&str, u16)> = syms.iter()
+                .filter_map(|s| fn_addr.get(s.as_str()).map(|&a| (s.as_str(), a)))
+                .collect();
+            sym_addrs.sort_by_key(|(_, a)| *a);
+            for (name, addr) in sym_addrs {
+                out.push_str(&rom_line!(4, name, addr));
+            }
+        }
+        // Any user-sym-set symbols not covered by a module (safety net)
+        let covered: std::collections::HashSet<&str> = user_modules.iter()
+            .flat_map(|(_, s)| s.iter().map(String::as_str))
+            .collect();
+        for (name, addr) in &displayed {
+            if user_sym_set.contains(name.as_str()) && !covered.contains(name.as_str()) {
+                out.push_str(&rom_line!(2, name.as_str(), *addr));
+            }
+        }
+        out.push('\n');
+    }
+
+    // ── Runtime library ───────────────────────────────────────────────────────
+    if !lib_fns.is_empty() {
+        out.push_str("Runtime library:\n");
+        for (name, addr) in &lib_fns {
+            out.push_str(&rom_line!(2, *name, *addr));
+        }
+        out.push('\n');
+    }
 
     // ── RAM section ──────────────────────────────────────────────────────────
     let sp_base = extract_sp_base(asm).unwrap_or(256);
-
-    // Group consecutive elements of the same array/string into one entry
     let grouped = group_ram_vars(&result.ram_vars);
 
-    // Partition into data-segment items and runtime scratch
-    let data_items: Vec<_> = grouped.iter()
-        .filter(|(name, _, _)| is_data_sym(name))
-        .collect();
-    let scratch_items: Vec<_> = grouped.iter()
-        .filter(|(name, _, _)| !is_data_sym(name))
-        .collect();
+    let data_items: Vec<_> = grouped.iter().filter(|(n, _, _)|  is_data_sym(n)).collect();
+    let scratch_items: Vec<_> = grouped.iter().filter(|(n, _, _)| !is_data_sym(n)).collect();
 
     let data_start = data_items.first().map(|(_, a, _)| *a);
-    let data_end   = result.ram_vars.iter()
-        .filter(|(n, _)| is_data_sym(n))
-        .last()
-        .map(|(_, a)| *a);
+    let data_end   = result.ram_vars.iter().filter(|(n, _)| is_data_sym(n)).last().map(|(_, a)| *a);
     let data_words = match (data_start, data_end) {
         (Some(s), Some(e)) => e - s + 1,
         _ => 0,
     };
 
-    out.push_str(&format!(
-        "RAM: stack base RAM[{}]  (0x{:04x})\n\n",
-        sp_base, sp_base
-    ));
+    out.push_str(&format!("RAM: stack base {}  (0x{:04x})\n\n", sp_base, sp_base));
 
     if !data_items.is_empty() {
         out.push_str(&format!(
-            "  [Data segment]  RAM[{}..{}]  ({} words)\n",
-            data_start.unwrap_or(16),
-            data_end.unwrap_or(16),
-            data_words
+            "Data segment  ({}..{}  {} words):\n",
+            data_start.unwrap_or(16), data_end.unwrap_or(16), data_words
         ));
         for (name, addr, count) in &data_items {
-            if *count == 1 {
-                out.push_str(&format!("    {:<36} RAM[{:5}]  0x{:04x}\n", name, addr, addr));
-            } else {
-                out.push_str(&format!(
-                    "    {:<36} RAM[{:5}]  0x{:04x}  ({} words)\n",
-                    name, addr, addr, count
-                ));
-            }
+            out.push_str(&format!("  {:<36} 0x{:04x}({:>5})  {:>5}\n", name, addr, addr, count));
         }
         out.push('\n');
     }
@@ -119,52 +186,150 @@ pub fn generate_map(asm: &str) -> String {
     if !scratch_items.is_empty() {
         let scratch_start = scratch_items.first().map(|(_, a, _)| *a).unwrap_or(0);
         let scratch_end   = scratch_items.last().map(|(_, a, c)| a + *c as u16 - 1).unwrap_or(0);
-        out.push_str(&format!(
-            "  [Runtime scratch]  RAM[{}..{}]\n",
-            scratch_start, scratch_end
-        ));
+        out.push_str(&format!("Runtime scratch  ({}..{}):\n", scratch_start, scratch_end));
         for (name, addr, count) in &scratch_items {
-            if *count == 1 {
-                out.push_str(&format!("    {:<36} RAM[{:5}]  0x{:04x}\n", name, addr, addr));
-            } else {
-                out.push_str(&format!(
-                    "    {:<36} RAM[{:5}]  0x{:04x}  ({} words)\n",
-                    name, addr, addr, count
-                ));
-            }
+            out.push_str(&format!("  {:<36} 0x{:04x}({:>5})  {:>5}\n", name, addr, addr, count));
         }
         out.push('\n');
     }
 
-    out.push_str(&format!("  Stack base:  RAM[{}]  0x{:04x}\n\n", sp_base, sp_base));
+    // ── Font table (Hackem/Tst only: lives in RAM@ sections, not assembler vars) ──
+    let font_entries: Vec<u16> = prog_data.iter()
+        .map(|d| d.address)
+        .filter(|&a| a >= crate::codegen::FONT_BASE as u16)
+        .collect();
+    let has_font = !font_entries.is_empty();
+    if has_font {
+        let font_start = crate::codegen::FONT_BASE as u16;
+        let font_total = 96u16 * 11;
+        let used = font_entries.len();
+        out.push_str(&format!(
+            "Font table  ({}..{}  {} words):\n",
+            font_start, font_start + font_total - 1, font_total
+        ));
+        out.push_str(&format!(
+            "  {:<36} 0x{:04x}({:>5})  {:>5}  ({} non-zero entries)\n",
+            "(96 chars × 11 rows bitmap)", font_start, font_start, font_total, used
+        ));
+        out.push('\n');
+    }
 
-    // ── Linked library modules ───────────────────────────────────────────────
-    if !provided.is_empty() {
-        let mut mods: Vec<&str> = provided.iter().map(String::as_str).collect();
-        mods.sort_unstable();
-        out.push_str(&format!("Linked library symbols ({}):\n", mods.len()));
-        // Wrap at ~80 chars
-        let mut line = String::from("  ");
-        for (i, sym) in mods.iter().enumerate() {
-            let sep = if i + 1 < mods.len() { ", " } else { "" };
-            let piece = format!("{}{}", sym, sep);
-            if line.len() + piece.len() > 80 {
-                out.push_str(&line);
-                out.push('\n');
-                line = String::from("  ");
-            }
-            line.push_str(&piece);
-        }
-        if line.trim().len() > 0 {
-            out.push_str(&line);
-            out.push('\n');
-        }
+    // ── Stack / Heap ──────────────────────────────────────────────────────────
+    // Stack grows upward from sp_base.
+    // If __alloc (malloc) is linked: heap lives at 2048..15326, pointer at 15327.
+    // Otherwise: stack owns all the way up to font table or SCREEN.
+    const HEAP_BASE:    u16 = 2048;
+    const HEAP_PTR:     u16 = 15327;   // RAM[15327] stores the bump pointer
+    const SCREEN_ADDR:  u16 = 16384;
+
+    let has_malloc = lib_provided.contains("__alloc");
+
+    if has_malloc {
+        let stack_avail = HEAP_BASE.saturating_sub(sp_base);
+        out.push_str(&format!("Stack  ({} words available):\n", stack_avail));
+        out.push_str(&format!(
+            "  {:<36} 0x{:04x}({:>5})\n", "base (SP)", sp_base, sp_base));
+        out.push_str(&format!(
+            "  {:<36} 0x{:04x}({:>5})  (heap base)\n",
+            "ceiling", HEAP_BASE, HEAP_BASE));
+        out.push('\n');
+
+        let heap_ceil   = HEAP_PTR - 1;
+        let heap_avail  = heap_ceil.saturating_sub(HEAP_BASE) + 1;
+        out.push_str(&format!("Heap  ({} words available):\n", heap_avail));
+        out.push_str(&format!(
+            "  {:<36} 0x{:04x}({:>5})\n", "base", HEAP_BASE, HEAP_BASE));
+        out.push_str(&format!(
+            "  {:<36} 0x{:04x}({:>5})  (bump pointer)\n",
+            "RAM[15327]", HEAP_PTR, HEAP_PTR));
+        out.push_str(&format!(
+            "  {:<36} 0x{:04x}({:>5})\n", "ceiling", heap_ceil, heap_ceil));
+        out.push('\n');
+    } else {
+        let stack_ceil = if has_font {
+            crate::codegen::FONT_BASE as u16
+        } else {
+            SCREEN_ADDR
+        };
+        let stack_avail = stack_ceil.saturating_sub(sp_base);
+        let ceil_label  = if has_font { "font table" } else { "SCREEN" };
+        out.push_str(&format!("Stack  ({} words available):\n", stack_avail));
+        out.push_str(&format!(
+            "  {:<36} 0x{:04x}({:>5})\n", "base (SP)", sp_base, sp_base));
+        out.push_str(&format!(
+            "  {:<36} 0x{:04x}({:>5})  ({})\n",
+            "ceiling", stack_ceil, stack_ceil, ceil_label));
+        out.push('\n');
     }
 
     out
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Split `asm` at the `// .library_section` marker line.
+/// Returns `(before_marker, after_marker)`.
+fn split_library(asm: &str) -> (&str, &str) {
+    const MARKER: &str = "// .library_section";
+    for line in asm.lines() {
+        if line.trim() == MARKER {
+            // Find byte offset of this line in the original string
+            let line_ptr = line.as_ptr() as usize;
+            let asm_ptr  = asm.as_ptr() as usize;
+            let offset   = line_ptr - asm_ptr;
+            let after    = offset + line.len();
+            // Skip the trailing newline after the marker
+            let after = if asm[after..].starts_with('\n') { after + 1 } else { after };
+            return (&asm[..offset], &asm[after..]);
+        }
+    }
+    (asm, "")
+}
+
+/// Collect user-module symbol lists from the user section of the assembly.
+///
+/// If `// .source <name>` markers are present, groups symbols per source file.
+/// Otherwise, returns a single group named from `fallback_names`.
+fn parse_user_modules(user_asm: &str, fallback_names: &[&str]) -> Vec<(String, Vec<String>)> {
+    let has_source = user_asm.lines().any(|l| l.trim().starts_with("// .source "));
+
+    if has_source {
+        let mut modules: Vec<(String, Vec<String>)> = Vec::new();
+        let mut current: Option<(String, Vec<String>)> = None;
+
+        for line in user_asm.lines() {
+            let line = line.trim();
+            if let Some(name) = line.strip_prefix("// .source ") {
+                if let Some(prev) = current.take() {
+                    if !prev.1.is_empty() { modules.push(prev); }
+                }
+                current = Some((name.to_string(), Vec::new()));
+            } else if let Some(rest) = line.strip_prefix(".provides ") {
+                if let Some((_, syms)) = current.as_mut() {
+                    syms.extend(rest.split_whitespace().map(String::from));
+                }
+            }
+        }
+        if let Some(prev) = current {
+            if !prev.1.is_empty() { modules.push(prev); }
+        }
+        modules
+    } else {
+        let all: Vec<String> = user_asm.lines()
+            .filter_map(|l| l.trim().strip_prefix(".provides "))
+            .flat_map(|r| r.split_whitespace().map(String::from))
+            .collect();
+        if all.is_empty() { return Vec::new(); }
+        let name = if fallback_names.is_empty() {
+            "user code".to_string()
+        } else {
+            fallback_names.join(", ")
+        };
+        vec![(name, all)]
+    }
+}
+
+// ── Remaining helpers (unchanged) ────────────────────────────────────────────
 
 /// Detect the SP-base value from the bootstrap preamble (`@N D=A @SP M=D`).
 fn extract_sp_base(asm: &str) -> Option<u16> {

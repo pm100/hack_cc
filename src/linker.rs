@@ -71,6 +71,7 @@ pub fn link(user_asm: &str, lib_dirs: &[PathBuf]) -> String {
 
     let mut combined = user_asm.to_string();
     let mut included: HashSet<String> = HashSet::new();
+    let mut library_section_emitted = false;
 
     loop {
         let defined = collect_defined(&combined);
@@ -92,6 +93,11 @@ pub fn link(user_asm: &str, lib_dirs: &[PathBuf]) -> String {
 
         if to_append.is_empty() {
             break;
+        }
+        // Emit the library-section marker once, before the first library module.
+        if !library_section_emitted {
+            combined.push_str("\n// .library_section\n");
+            library_section_emitted = true;
         }
         for text in to_append {
             combined.push('\n');

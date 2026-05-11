@@ -1,74 +1,78 @@
 === hack_cc Memory Map ===
 
-ROM: 8261 instructions  (0x0000 – 0x2044)
+ROM: 7854 instructions  (0x0000..0x1ead)
 
-  [Bootstrap]
-    __end                                ROM[  423]  0x01a7
-    __ld_main_ret                        ROM[  423]  0x01a7
+Bootstrap:
+  (startup / call main)                0x0000(    0)     16
+  __end                                0x0010(   16)      2
 
-  [Library]
-    print_str                            ROM[  425]  0x01a9
-    print_int                            ROM[  511]  0x01ff
-    month_name                           ROM[  613]  0x0265
-    readint                              ROM[ 1265]  0x04f1
-    pstr                                 ROM[ 2319]  0x090f
-    jan1                                 ROM[ 2964]  0x0b94
-    cal                                  ROM[ 3589]  0x0e05
-    main                                 ROM[ 6250]  0x186a
-    __div                                ROM[ 7330]  0x1ca2
-    __mul                                ROM[ 7396]  0x1ce4
-    __vm_call                            ROM[ 7449]  0x1d19
-    __vm_return                          ROM[ 7497]  0x1d49
-    getchar                              ROM[ 7540]  0x1d74
-    itoa                                 ROM[ 7559]  0x1d87
-    memset                               ROM[ 7585]  0x1da1
-    putchar_screen                       ROM[ 7670]  0x1df6
-    puts_screen                          ROM[ 7691]  0x1e0b
-    __console_putchar                    ROM[ 7710]  0x1e1e
-    __itoa                               ROM[ 7872]  0x1ec0
-    __puts_screen                        ROM[ 7998]  0x1f3e
-    __draw_char                          ROM[ 8036]  0x1f64
+User code:
+  [cal.c]
+    print_str                          0x0012(   18)     86
+    print_int                          0x0068(  104)    102
+    month_name                         0x00ce(  206)    652
+    readint                            0x035a(  858)   1054
+    pstr                               0x0778( 1912)    645
+    jan1                               0x09fd( 2557)    625
+    cal                                0x0c6e( 3182)   2661
+    main                               0x16d3( 5843)   1080
 
-RAM: stack base RAM[487]  (0x01e7)
+Runtime library:
+  __div                                0x1b0b( 6923)     66
+  __mul                                0x1b4d( 6989)     53
+  __vm_call                            0x1b82( 7042)     48
+  __vm_return                          0x1bb2( 7090)     43
+  getchar                              0x1bdd( 7133)     19
+  itoa                                 0x1bf0( 7152)     26
+  memset                               0x1c0a( 7178)     85
+  putchar_screen                       0x1c5f( 7263)     21
+  puts_screen                          0x1c74( 7284)     19
+  __console_putchar                    0x1c87( 7303)    162
+  __itoa                               0x1d29( 7465)    126
+  __puts_screen                        0x1da7( 7591)     38
+  __draw_char                          0x1dcd( 7629)    225
 
-  [Data segment]  RAM[16..422]  (407 words)
-    __str_0                              RAM[   16]  0x0010  (9 words)
-    __str_1                              RAM[   25]  0x0019  (10 words)
-    __str_2                              RAM[   35]  0x0023  (7 words)
-    __str_3                              RAM[   42]  0x002a  (7 words)
-    __str_4                              RAM[   49]  0x0031  (5 words)
-    __str_5                              RAM[   54]  0x0036  (6 words)
-    __str_6                              RAM[   60]  0x003c  (6 words)
-    __str_7                              RAM[   66]  0x0042  (8 words)
-    __str_8                              RAM[   74]  0x004a  (11 words)
-    __str_9                              RAM[   85]  0x0055  (9 words)
-    __str_10                             RAM[   94]  0x005e  (10 words)
-    __str_11                             RAM[  104]  0x0068  (10 words)
-    __str_12                             RAM[  114]  0x0072  (5 words)
-    __str_13                             RAM[  119]  0x0077  (24 words)
-    __str_14                             RAM[  143]  0x008f  (24 words)
-    __str_15                             RAM[  167]  0x00a7  (24 words)
-    __str_16                             RAM[  191]  0x00bf  (18 words)
-    __str_17                             RAM[  209]  0x00d1  (24 words)
-    __str_18                             RAM[  233]  0x00e9  (19 words)
-    __str_19                             RAM[  252]  0x00fc  (5 words)
-    __str_20                             RAM[  257]  0x0101  (22 words)
-    __g_string                           RAM[  279]  0x0117  (144 words)
+RAM: stack base 487  (0x01e7)
 
-  [Runtime scratch]  RAM[423..431]
-    __con_r3                             RAM[  423]  0x01a7
-    __con_ch                             RAM[  424]  0x01a8
-    __con_col                            RAM[  425]  0x01a9
-    __con_row                            RAM[  426]  0x01aa
-    __con_src                            RAM[  427]  0x01ab
-    __con_dst                            RAM[  428]  0x01ac
-    __con_n                              RAM[  429]  0x01ad
-    __pss_r3                             RAM[  430]  0x01ae
-    __pss_ptr                            RAM[  431]  0x01af
+Data segment  (16..422  407 words):
+  __str_0                              0x0010(   16)      9
+  __str_1                              0x0019(   25)     10
+  __str_2                              0x0023(   35)      7
+  __str_3                              0x002a(   42)      7
+  __str_4                              0x0031(   49)      5
+  __str_5                              0x0036(   54)      6
+  __str_6                              0x003c(   60)      6
+  __str_7                              0x0042(   66)      8
+  __str_8                              0x004a(   74)     11
+  __str_9                              0x0055(   85)      9
+  __str_10                             0x005e(   94)     10
+  __str_11                             0x0068(  104)     10
+  __str_12                             0x0072(  114)      5
+  __str_13                             0x0077(  119)     24
+  __str_14                             0x008f(  143)     24
+  __str_15                             0x00a7(  167)     24
+  __str_16                             0x00bf(  191)     18
+  __str_17                             0x00d1(  209)     24
+  __str_18                             0x00e9(  233)     19
+  __str_19                             0x00fc(  252)      5
+  __str_20                             0x0101(  257)     22
+  __g_string                           0x0117(  279)    144
 
-  Stack base:  RAM[487]  0x01e7
+Runtime scratch  (423..431):
+  __con_r3                             0x01a7(  423)      1
+  __con_ch                             0x01a8(  424)      1
+  __con_col                            0x01a9(  425)      1
+  __con_row                            0x01aa(  426)      1
+  __con_src                            0x01ab(  427)      1
+  __con_dst                            0x01ac(  428)      1
+  __con_n                              0x01ad(  429)      1
+  __pss_r3                             0x01ae(  430)      1
+  __pss_ptr                            0x01af(  431)      1
 
-Linked library symbols (21):
-  __console_putchar, __div, __draw_char, __itoa, __mul, __puts_screen, 
-  __vm_call, __vm_return, cal, getchar, itoa, jan1, main, memset, month_name, 
-  print_int, print_str, pstr, putchar_screen, puts_screen, readint
+Font table  (15328..16383  1056 words):
+  (96 chars × 11 rows bitmap)          0x3be0(15328)   1056  (705 non-zero entries)
+
+Stack  (14841 words available):
+  base (SP)                            0x01e7(  487)
+  ceiling                              0x3be0(15328)  (font table)
+

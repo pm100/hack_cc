@@ -1,0 +1,54 @@
+=== hack_cc Memory Map ===
+
+ROM: 6092 instructions  (0x0000..0x17cb)
+
+Bootstrap:
+  (startup / call main)                0x0000(    0)     16
+  __end                                0x0010(   16)      2
+
+User code:
+  [pong.c]
+    show_score                         0x0012(   18)    239
+    new_round                          0x0101(  257)    152
+    main                               0x0199(  409)   4291
+
+Runtime library:
+  __mul                                0x125c( 4700)     53
+  __vm_call                            0x1291( 4753)     48
+  __vm_return                          0x12c1( 4801)     43
+  clear_rect                           0x12ec( 4844)    125
+  clear_screen                         0x1369( 4969)     55
+  draw_string                          0x13a0( 5024)     73
+  fill_rect                            0x13e9( 5097)    125
+  itoa                                 0x1466( 5222)     26
+  read_key                             0x1480( 5248)      9
+  sys_wait                             0x1489( 5257)     53
+  __clear_pixel                        0x14be( 5310)    129
+  __clear_screen                       0x153f( 5439)     20
+  __draw_pixel                         0x1553( 5459)    129
+  __draw_string                        0x15d4( 5588)     67
+  __itoa                               0x1617( 5655)    126
+  __sys_wait                           0x1695( 5781)     20
+  __div                                0x16a9( 5801)     66
+  __draw_char                          0x16eb( 5867)    225
+
+RAM: stack base 256  (0x0100)
+
+Data segment  (16..26  11 words):
+  __str_0                              0x0010(   16)      3
+  __g_by                               0x0013(   19)      1
+  __g_bdx                              0x0014(   20)      1
+  __g_bdy                              0x0015(   21)      1
+  __g_p2y                              0x0016(   22)      1
+  __g_bx                               0x0017(   23)      1
+  __g_s2                               0x0018(   24)      1
+  __g_p1y                              0x0019(   25)      1
+  __g_s1                               0x001a(   26)      1
+
+Font table  (15328..16383  1056 words):
+  (96 chars × 11 rows bitmap)          0x3be0(15328)   1056  (705 non-zero entries)
+
+Stack  (15072 words available):
+  base (SP)                            0x0100(  256)
+  ceiling                              0x3be0(15328)  (font table)
+

@@ -70,7 +70,21 @@ pub fn assemble_with_symbols(asm: &str, var_base: u16) -> Result<AssemblerResult
 
     for line in &lines {
         let line = strip_comment(line).trim();
-        if line.is_empty() || line.starts_with('.') || line.starts_with('(') { continue; }
+        if line.is_empty() || line.starts_with('(') { continue; }
+
+        // .alloc <name>: reserve a RAM slot without emitting any ROM instruction.
+        // Used by the hackem/tst bootstrap to fix variable addresses in order
+        // without burning ROM words on store instructions.
+        if let Some(sym) = line.strip_prefix(".alloc ").map(str::trim) {
+            if !sym.is_empty() && !symbols.contains_key(sym) && !predefined_set.contains(sym) {
+                symbols.insert(sym.to_string(), var_addr);
+                ram_vars.push((sym.to_string(), var_addr));
+                var_addr += 1;
+            }
+            continue;
+        }
+
+        if line.starts_with('.') { continue; }
 
         let word = if let Some(sym) = line.strip_prefix('@') {
             let value: u16 = if let Ok(n) = sym.parse::<u16>() {

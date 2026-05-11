@@ -43,10 +43,11 @@ struct Cli {
     /// Use -D HACK_OUTPUT_SCREEN to select screen-buffer output.
     #[arg(short = 'D', value_name = "NAME[=VALUE]")]
     defines: Vec<String>,
-    /// Write a map file (memory layout report) alongside the output.
-    /// The map file uses the same base name as the output with a .map extension.
-    #[arg(long = "map", short = 'm')]
-    map: bool,
+    /// Write a map file to PATH. If PATH is omitted, uses the output base name
+    /// with a .map extension.
+    #[arg(long = "map", short = 'm', value_name = "PATH", num_args = 0..=1,
+          default_missing_value = "")]
+    map: Option<String>,
 }
 
 fn main() {
@@ -182,9 +183,16 @@ fn main() {
         println!("wrote {:?} and {:?}", out_path, hack_path);
     }
 
-    if cli.map {
-        let map_text = hack_cc::mapfile::generate_map(&prog.asm);
-        let map_path = out_path.with_extension("map");
+    if let Some(map_arg) = &cli.map {
+        let source_names: Vec<&str> = cli.inputs.iter()
+            .map(|p| p.file_name().and_then(|n| n.to_str()).unwrap_or("?"))
+            .collect();
+        let map_text = hack_cc::mapfile::generate_map(&prog.asm, &source_names, &prog.data);
+        let map_path = if map_arg.is_empty() {
+            out_path.with_extension("map")
+        } else {
+            std::path::PathBuf::from(map_arg)
+        };
         std::fs::write(&map_path, &map_text).unwrap_or_else(|e| {
             eprintln!("error writing map {:?}: {}", map_path, e);
             std::process::exit(1);
