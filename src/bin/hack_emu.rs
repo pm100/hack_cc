@@ -342,7 +342,9 @@ fn load_hack(src: &str) -> Result<(Vec<Instr>, Vec<i16>), String> {
     let mut rom: Vec<Instr> = Vec::new();
     for line in src.lines() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         if line.len() != 16 || !line.chars().all(|c| c == '0' || c == '1') {
             return Err(format!("invalid .hack line: {:?}", line));
         }
@@ -383,7 +385,8 @@ fn load_tst(src: &str, tst_path: &std::path::Path) -> Result<(Vec<Instr>, Vec<i1
         }
     }
 
-    let parent = tst_path.parent()
+    let parent = tst_path
+        .parent()
         .ok_or("cannot get parent dir of .tst file")?;
 
     // 1. Try companion with same stem as the .tst file (what hack_ld produces).
@@ -393,8 +396,7 @@ fn load_tst(src: &str, tst_path: &std::path::Path) -> Result<(Vec<Instr>, Vec<i1
             .map_err(|e| format!("cannot read {:?}: {}", stem_hack, e))?
     } else {
         // 2. Fall back to the filename from the `load` directive.
-        let hack_name = hack_file_from_directive
-            .ok_or("no 'load' directive found in .tst file")?;
+        let hack_name = hack_file_from_directive.ok_or("no 'load' directive found in .tst file")?;
         let hack_path = parent.join(&hack_name);
         std::fs::read_to_string(&hack_path)
             .map_err(|e| format!("cannot read companion {:?}: {}", hack_path, e))?
@@ -623,7 +625,12 @@ fn main() {
             eprintln!("hackem load error: {}", e);
             std::process::exit(1);
         })
-    } else if src.lines().next().map(|l| l.len() == 16 && l.chars().all(|c| c == '0' || c == '1')).unwrap_or(false) {
+    } else if src
+        .lines()
+        .next()
+        .map(|l| l.len() == 16 && l.chars().all(|c| c == '0' || c == '1'))
+        .unwrap_or(false)
+    {
         // .hack format: lines of 16 binary digits
         load_hack(&src).unwrap_or_else(|e| {
             eprintln!("hack load error: {}", e);
@@ -1712,19 +1719,22 @@ int main() { return quad(3); }
         let ret = compile_and_run("int main() { return 100 * 100; }", 5_000_000);
         assert_eq!(ret, 10000);
     }
-    // #[test]
-    // fn misc_string_tests(){
-    //     let ret = compile_and_run(r#"
-    //     #include <hack.h>
-    //     int main(){
-    //       char msg[4]="abc";
-    //     //  int a = 4;//sizeof msg ;
-    //       //int b = strlen(msg);
-    //       return msg[1];
-    // }
-    //     "#, 5_000_000);
-    //     assert_eq!(ret, 7);
-    // }
+    #[test]
+    fn misc_string_tests() {
+        let ret = compile_and_run(
+            r#"
+        #include <hack.h>
+        int main(){
+          char msg[4]="abc";
+          int a =sizeof(msg );
+          int b = strlen(msg);
+          return a+b;
+    }
+        "#,
+            5_000_000,
+        );
+        assert_eq!(ret, 7);
+    }
 
     // ── Bug regression tests ──────────────────────────────────────────────
 
@@ -1960,8 +1970,8 @@ int main() {
     /// Load a .hack binary file and run it — verifies load_hack() + decode_word().
     #[test]
     fn test_load_hack_format_and_run() {
-        use hack_cc::output::{OutputFormat, emit};
         use hack_cc::compile;
+        use hack_cc::output::{OutputFormat, emit};
         let prog = compile("int main() { return 42; }").unwrap();
         let result = emit(&prog, OutputFormat::Hack).unwrap();
         // Parse the .hack binary back via load_hack
@@ -1969,7 +1979,9 @@ int main() {
         let mut cpu = Cpu::new();
         let mut cycles = 0u64;
         loop {
-            if cycles >= 2_000_000 || !cpu.step(&rom, false) { break; }
+            if cycles >= 2_000_000 || !cpu.step(&rom, false) {
+                break;
+            }
             cycles += 1;
         }
         assert_eq!(cpu.ram[256], 42, "return value from .hack loaded program");
@@ -1979,8 +1991,8 @@ int main() {
     /// and loads the companion binary.
     #[test]
     fn test_load_tst_format_and_run() {
-        use hack_cc::output::{OutputFormat, emit};
         use hack_cc::compile;
+        use hack_cc::output::{OutputFormat, emit};
         use std::fs;
         let prog = compile("int main() { return 7; }").unwrap();
         let result = emit(&prog, OutputFormat::Tst).unwrap();
@@ -1989,7 +2001,7 @@ int main() {
         fs::create_dir_all(&dir).unwrap();
         // The .tst says "load prog.hack," so companion must be prog.hack
         let hack_path = dir.join("prog.hack");
-        let tst_path  = dir.join("test_prog.tst");
+        let tst_path = dir.join("test_prog.tst");
         fs::write(&hack_path, result.hack_companion.as_ref().unwrap()).unwrap();
         fs::write(&tst_path, &result.main).unwrap();
 
@@ -1997,11 +2009,15 @@ int main() {
         let (rom, ram) = load_tst(&tst_src, &tst_path).unwrap();
         let mut cpu = Cpu::new();
         for (i, &v) in ram.iter().enumerate() {
-            if v != 0 { cpu.ram[i] = v; }
+            if v != 0 {
+                cpu.ram[i] = v;
+            }
         }
         let mut cycles = 0u64;
         loop {
-            if cycles >= 2_000_000 || !cpu.step(&rom, false) { break; }
+            if cycles >= 2_000_000 || !cpu.step(&rom, false) {
+                break;
+            }
             cycles += 1;
         }
         assert_eq!(cpu.ram[256], 7, "return value from .tst loaded program");
@@ -2096,9 +2112,8 @@ int main(void) {
         // " S  M Tu  W Th  F  S" is the second line on screen (row 1).
         // Row 1 = pixel rows 11..21. Col 1 has 'S' (after leading space).
         // 'S' is at pixel x=8..15. Check if any pixel in row 1 is set.
-        let row1_has_pixels = (11..22_usize).any(|py|
-            (8..16_usize).any(|px| pixel_set(ram, px, py))
-        );
+        let row1_has_pixels =
+            (11..22_usize).any(|py| (8..16_usize).any(|px| pixel_set(ram, px, py)));
         assert!(
             row1_has_pixels,
             "No pixels set in row 1 where ' S  M Tu  W Th  F  S' header should be.\nScreen:\n{}",
@@ -2135,9 +2150,15 @@ int main(void) {
         const KEY_SPACING: u64 = 2_500_000;
         const FIRST_KEY_AT: u64 = 2_000_000;
         let keys: &[i16] = &[
-            b'1' as i16, 128, // month "1" + Enter
-            b'1' as i16, b'9' as i16, b'7' as i16, b'0' as i16, 128, // year "1970" + Enter
-            b'0' as i16, 128, // quit "0" + Enter
+            b'1' as i16,
+            128, // month "1" + Enter
+            b'1' as i16,
+            b'9' as i16,
+            b'7' as i16,
+            b'0' as i16,
+            128, // year "1970" + Enter
+            b'0' as i16,
+            128, // quit "0" + Enter
         ];
         let key_times: Vec<u64> = (0..keys.len() as u64)
             .map(|i| FIRST_KEY_AT + i * KEY_SPACING)
@@ -2148,7 +2169,9 @@ int main(void) {
         let max_cycles = FIRST_KEY_AT + keys.len() as u64 * KEY_SPACING + 5_000_000;
 
         for cycle in 0..max_cycles {
-            if !cpu.step(&rom, false) { break; }
+            if !cpu.step(&rom, false) {
+                break;
+            }
             // Inject next key based on cycle count
             let mut kbd: i16 = 0;
             for (i, &t) in key_times.iter().enumerate() {
@@ -2164,13 +2187,15 @@ int main(void) {
         let screen_str = render_screen_ascii(ram);
         // Print the first 20 text rows (220 pixel rows) for diagnosis
         let first_220_lines: String = screen_str.lines().take(220).collect::<Vec<_>>().join("\n");
-        eprintln!("=== SCREEN (first 20 text rows) ===\n{}\n===", first_220_lines);
+        eprintln!(
+            "=== SCREEN (first 20 text rows) ===\n{}\n===",
+            first_220_lines
+        );
         // After title (row 0), separator (row 1), prompt+month input (row 2),
         // prompt+year input (row 3), month-year line (row 4), the header is row 5 (pixels 55..65).
         // Allow wider search: rows 2..10 (pixels 22..110) for the header text.
-        let header_row_has_pixels = (22..110_usize).any(|py|
-            (8..180_usize).any(|px| pixel_set(ram, px, py))
-        );
+        let header_row_has_pixels =
+            (22..110_usize).any(|py| (8..180_usize).any(|px| pixel_set(ram, px, py)));
         assert!(
             header_row_has_pixels,
             "No pixels found for any output below row 1 (title/separator).\nMay be stuck at keyboard input.\nScreen:\n{}",
@@ -2180,9 +2205,7 @@ int main(void) {
         // The header " S  M Tu  W Th  F  S" should be on screen somewhere.
         // 'S' glyph at col 1 (x=8..15).  Check pixel rows 22..220 for the 'S' pattern.
         // In any text row after the prompts.
-        let has_header_s = (22..220_usize).any(|py|
-            (8..16_usize).any(|px| pixel_set(ram, px, py))
-        );
+        let has_header_s = (22..220_usize).any(|py| (8..16_usize).any(|px| pixel_set(ram, px, py)));
         assert!(
             has_header_s,
             "No 'S' glyph found in col 1 (x 8-15) in any text row — header may be missing.\nScreen:\n{}",
