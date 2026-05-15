@@ -22,20 +22,29 @@ const EXPECTED_JSON: &str =
     r"C:\work\forks\writing-a-c-compiler-tests\expected_results.json";
 
 /// Maximum chapter number to test (chapters 1..=MAX_CHAPTER).
-const MAX_CHAPTER: u32 = 10;
+const MAX_CHAPTER: u32 = 20;
 
 /// Maximum emulator cycles per test (generous — some tests use recursion).
 const MAX_CYCLES: &str = "5000000";
 
+/// Chapters that are entirely skipped.
+const SKIP_CHAPTERS: &[u32] = &[
+    11, // long/LONG64 — test suite assumes 64-bit long; our long is 32-bit
+];
+
 /// Sub-directory names that are always skipped.
 const SKIP_SUBDIRS: &[&str] = &[
-    "libraries",    // multi-file programs — single-file compiler only
+    "libraries",     // multi-file programs — single-file compiler only
 ];
 
 /// Specific file names (basename only) that are always skipped.
-/// These require platform-specific external assembly linkage that Hack cannot provide.
 const SKIP_FILES: &[&str] = &[
-    "stack_alignment.c",   // requires stack_alignment_check_<platform>.s
+    "stack_alignment.c",              // requires stack_alignment_check_<platform>.s
+    "pass_args_on_page_boundary.c",   // requires data_on_page_boundary_<platform>.s
+    "return_big_struct_on_page_boundary.c", // same
+    "return_struct_on_page_boundary.c",     // same
+    "sizeof_not_evaluated.c",         // expects sizeof(int)==4; our 16-bit word size returns 1
+    "sizeof_result_is_ulong.c",       // expects sizeof(size_t)==8; our sizeof returns int (1 word)
 ];
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -130,15 +139,53 @@ fn has_out_of_range_literal(src: &str) -> bool {
     false
 }
 
+/// Return true if the source file uses type keywords our compiler doesn't support
+/// (e.g., `double`, `float`, `LONG64`). Such tests are skipped rather than failed.
+fn has_unsupported_type_keyword(src: &str) -> bool {
+    // Check for whole-word occurrences of unsupported type keywords.
+    let keywords = ["double", "float", "LONG64"];
+    for kw in keywords {
+        let kw_bytes = kw.as_bytes();
+        let src_bytes = src.as_bytes();
+        let mut i = 0;
+        while i + kw_bytes.len() <= src_bytes.len() {
+            if src_bytes[i..i + kw_bytes.len()] == *kw_bytes {
+                let before_ok = i == 0 || !src_bytes[i - 1].is_ascii_alphanumeric() && src_bytes[i - 1] != b'_';
+                let after_pos = i + kw_bytes.len();
+                let after_ok = after_pos >= src_bytes.len()
+                    || !src_bytes[after_pos].is_ascii_alphanumeric() && src_bytes[after_pos] != b'_';
+                if before_ok && after_ok {
+                    return true;
+                }
+            }
+            i += 1;
+        }
+    }
+    false
+}
+
+/// Sub-directory names that mark tests expecting a compile *error*.
+const INVALID_SUBDIRS: &[&str] = &[
+    "invalid_lex",
+    "invalid_parse",
+    "invalid_semantics",
+    "invalid_types",
+    "invalid_declarations",
+];
+
 // ── Stats ─────────────────────────────────────────────────────────────────────
 
 #[derive(Default)]
 struct Stats {
+    // Valid tests (compiler should accept)
     pass: u32,
     skip_dir: u32,
     skip_compile: u32,
     fail: u32,
     failures: Vec<String>,
+    // Invalid tests (compiler should reject)
+    inv_pass: u32,  // correctly rejected
+    inv_fail: u32,  // incorrectly accepted
 }
 
 impl Stats {
@@ -171,13 +218,16 @@ fn external_c_test_suite() {
     let mut chapter_lines: Vec<String> = Vec::new();
 
     for chapter in 1..=MAX_CHAPTER {
-        let chapter_dir = Path::new(SUITE_TESTS).join(format!("chapter_{chapter}"));
-        let valid_dir = chapter_dir.join("valid");
-        if !valid_dir.exists() {
+        if SKIP_CHAPTERS.contains(&chapter) {
             continue;
         }
+        let chapter_dir = Path::new(SUITE_TESTS).join(format!("chapter_{chapter}"));
+        if !chapter_dir.exists() {
+            continue;
+        }
+        let valid_dir = chapter_dir.join("valid");
 
-        let c_files = collect_c_files(&valid_dir);
+        let c_files = if valid_dir.exists() { collect_c_files(&valid_dir) } else { vec![] };
         let mut ch = Stats::default();
 
         for c_file in &c_files {
@@ -212,6 +262,12 @@ fn external_c_test_suite() {
                 continue;
             }
 
+            // Skip tests using type keywords our compiler doesn't support.
+            if has_unsupported_type_keyword(&src) {
+                ch.skip_compile += 1;
+                continue;
+            }
+
             // Look up expected result (skip if not in JSON).
             let exp = match expected.get(&rel) {
                 Some(e) => e,
@@ -236,7 +292,8 @@ fn external_c_test_suite() {
 
             let compiled = cc.map(|o| o.status.success()).unwrap_or(false);
             if !compiled {
-                ch.skip_compile += 1;
+                ch.fail += 1;
+                ch.failures.push(format!("FAIL  {rel}  (compile error)"));
                 continue;
             }
 
@@ -278,9 +335,49 @@ fn external_c_test_suite() {
             }
         }
 
+        // ── Invalid tests: compiler must reject these ─────────────────────────
+        for inv_subdir in INVALID_SUBDIRS {
+            let inv_dir = chapter_dir.join(inv_subdir);
+            if !inv_dir.exists() {
+                continue;
+            }
+            let inv_files = collect_c_files(&inv_dir);
+            for c_file in &inv_files {
+                let rel = c_file
+                    .strip_prefix(SUITE_TESTS)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .replace('\\', "/")
+                    .trim_start_matches('/')
+                    .to_string();
+
+                let idx = ch.pass + ch.total_skip() + ch.fail + ch.inv_pass + ch.inv_fail;
+                let asm_file = tmp.join(format!("ch{chapter}_{idx}.asm"));
+
+                let cc = Command::new(hack_cc)
+                    .args([
+                        c_file.to_str().unwrap(),
+                        "-o",
+                        asm_file.to_str().unwrap(),
+                    ])
+                    .output();
+
+                let compiled = cc.map(|o| o.status.success()).unwrap_or(false);
+                if compiled {
+                    // Compiler accepted invalid code — that's a bug.
+                    ch.inv_fail += 1;
+                    ch.failures.push(format!("FAIL  {rel}  (accepted invalid code)"));
+                } else {
+                    ch.inv_pass += 1;
+                }
+            }
+        }
+
         chapter_lines.push(format!(
-            "  chapter_{chapter:2}: {:3} pass  {:3} skip ({} dir + {} compile)  {:3} fail",
+            "  chapter_{chapter:2}: {:3} pass  {:3} skip ({} dir + {} compile)  {:3} fail  |  inv: {:3} reject  {:3} accepted",
             ch.pass, ch.total_skip(), ch.skip_dir, ch.skip_compile, ch.fail,
+            ch.inv_pass, ch.inv_fail,
         ));
         for f in &ch.failures {
             chapter_lines.push(format!("          {f}"));
@@ -290,6 +387,8 @@ fn external_c_test_suite() {
         total.skip_dir += ch.skip_dir;
         total.skip_compile += ch.skip_compile;
         total.fail += ch.fail;
+        total.inv_pass += ch.inv_pass;
+        total.inv_fail += ch.inv_fail;
         total.failures.extend(ch.failures);
     }
 
@@ -299,12 +398,16 @@ fn external_c_test_suite() {
         println!("{line}");
     }
     println!(
-        "\n  TOTAL: {} pass, {} skip ({} dir + {} compile), {} fail",
+        "\n  TOTAL valid:   {} pass, {} skip ({} dir + {} compile), {} fail",
         total.pass,
         total.total_skip(),
         total.skip_dir,
         total.skip_compile,
         total.fail
+    );
+    println!(
+        "  TOTAL invalid: {} correctly rejected, {} incorrectly accepted",
+        total.inv_pass, total.inv_fail,
     );
 
     if !total.failures.is_empty() {
@@ -314,9 +417,10 @@ fn external_c_test_suite() {
         }
     }
 
+    let total_fail = total.fail + total.inv_fail;
     assert_eq!(
-        total.fail, 0,
-        "{} test(s) produced wrong output (see above)",
-        total.fail
+        total_fail, 0,
+        "{} test(s) failed (see above)",
+        total_fail
     );
 }

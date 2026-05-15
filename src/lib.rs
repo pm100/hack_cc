@@ -215,7 +215,7 @@ pub fn compile_files_with_full_options(
 fn build_object_text(
     provides: &[String],
     string_literals: &[(String, Vec<i16>)],
-    globals_info: &[(String, crate::parser::Type, Option<i32>)],
+    globals_info: &[(String, crate::parser::Type, Option<sema::GlobalInit>)],
     struct_defs: &std::collections::HashMap<String, Vec<(String, crate::parser::Type)>>,
     compiled: &codegen::CompiledProgram,
 ) -> String {
@@ -235,13 +235,23 @@ fn build_object_text(
         }
         out.push_str(&format!(".data {}_{} 0\n", sym_prefix, n));
     }
-    // Multi-word globals
-    for (sym, ty, _) in globals_info {
+    // Multi-word globals (arrays, structs, longs) — emit actual init values
+    for (sym, ty, init_val) in globals_info {
         let size = sema::type_size(ty, struct_defs).max(1);
         if size > 1 {
             for i in 0..size {
                 let elem_sym = if i == 0 { sym.clone() } else { format!("{}_{}", sym, i) };
-                out.push_str(&format!(".data {} 0\n", elem_sym));
+                let val: i16 = match (init_val, ty) {
+                    (Some(sema::GlobalInit::Array(vals)), _) => {
+                        vals.get(i).copied().unwrap_or(0) as i16
+                    }
+                    (Some(sema::GlobalInit::Scalar(v)), crate::parser::Type::Long) => {
+                        let v32 = *v as u32;
+                        if i == 0 { (v32 >> 16) as i16 } else { v32 as i16 }
+                    }
+                    _ => 0,
+                };
+                out.push_str(&format!(".data {} {}\n", elem_sym, val));
             }
         }
     }
@@ -249,7 +259,10 @@ fn build_object_text(
     for (sym, ty, init_val) in globals_info {
         let size = sema::type_size(ty, struct_defs).max(1);
         if size == 1 {
-            let val = init_val.unwrap_or(0) as i16;
+            let val = match init_val {
+                Some(sema::GlobalInit::Scalar(v)) => *v as i16,
+                _ => 0,
+            };
             out.push_str(&format!(".data {} {}\n", sym, val));
         }
     }

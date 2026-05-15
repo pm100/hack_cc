@@ -29,6 +29,7 @@ pub enum Type {
     Void,
     Int,
     Char,
+    UnsignedChar,
     Long,  // 32-bit (2 words)
     Ptr(Box<Type>),
     Array(Box<Type>, usize),
@@ -41,7 +42,7 @@ impl Type {
     pub fn size(&self) -> usize {
         match self {
             Type::Void => 0,
-            Type::Int | Type::Char => 1,
+            Type::Int | Type::Char | Type::UnsignedChar => 1,
             Type::Long => 2,
             Type::Ptr(_) => 1,
             Type::Array(base, n) => base.size() * n,
@@ -156,11 +157,20 @@ struct Parser {
     enum_map: HashMap<String, i32>,
     /// Set by `parse_base_type` when it consumes a storage-class keyword.
     cur_storage_class: StorageClass,
+    in_for_init: bool,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0, struct_defs: Vec::new(), typedef_map: HashMap::new(), enum_map: HashMap::new(), cur_storage_class: StorageClass::None }
+        Self {
+            tokens,
+            pos: 0,
+            struct_defs: Vec::new(),
+            typedef_map: HashMap::new(),
+            enum_map: HashMap::new(),
+            cur_storage_class: StorageClass::None,
+            in_for_init: false,
+        }
     }
 
     fn cur(&self) -> &Token {
@@ -229,20 +239,37 @@ impl Parser {
                 return self.parse_base_type();
             }
             TokenKind::KwExtern => {
+                if self.cur_storage_class != StorageClass::None {
+                    let (l, c) = self.cur_lc();
+                    return Err(ParseError::new(l, c, "multiple storage class specifiers"));
+                }
                 self.cur_storage_class = StorageClass::Extern;
                 self.advance();
                 return self.parse_base_type();
             }
             TokenKind::KwStatic => {
+                if self.cur_storage_class != StorageClass::None {
+                    let (l, c) = self.cur_lc();
+                    return Err(ParseError::new(l, c, "multiple storage class specifiers"));
+                }
                 self.cur_storage_class = StorageClass::Static;
                 self.advance();
                 return self.parse_base_type();
             }
             TokenKind::KwUnsigned | TokenKind::KwSigned => {
+                let is_unsigned = *self.peek() == TokenKind::KwUnsigned;
                 self.advance();
+                // Allow storage-class keywords to appear after signed/unsigned
+                if matches!(self.peek(), TokenKind::KwExtern | TokenKind::KwStatic) {
+                    let base = self.parse_base_type()?; // will set storage class
+                    return Ok(base);
+                }
                 match self.peek().clone() {
                     TokenKind::KwInt  => { self.advance(); return Ok(Type::Int); }
-                    TokenKind::KwChar => { self.advance(); return Ok(Type::Char); }
+                    TokenKind::KwChar => {
+                        self.advance();
+                        return Ok(if is_unsigned { Type::UnsignedChar } else { Type::Char });
+                    }
                     TokenKind::KwLong => {
                         self.advance();
                         if *self.peek() == TokenKind::KwLong { self.advance(); }
@@ -299,16 +326,30 @@ impl Parser {
     fn parse_typed_decl(&mut self) -> Result<(Type, String), ParseError> {
         let mut ty = self.parse_type()?;
         // Handle C's "type before storage class" syntax: `int static foo` or `int extern bar`.
-        match self.peek() {
-            TokenKind::KwStatic => {
-                self.cur_storage_class = StorageClass::Static;
-                self.advance();
+        // Also consume redundant trailing type qualifiers: `int static signed foo`.
+        loop {
+            match self.peek() {
+                TokenKind::KwStatic => {
+                    if self.cur_storage_class != StorageClass::None {
+                        let (l, c) = self.cur_lc();
+                        return Err(ParseError::new(l, c, "multiple storage class specifiers"));
+                    }
+                    self.cur_storage_class = StorageClass::Static;
+                    self.advance();
+                }
+                TokenKind::KwExtern => {
+                    if self.cur_storage_class != StorageClass::None {
+                        let (l, c) = self.cur_lc();
+                        return Err(ParseError::new(l, c, "multiple storage class specifiers"));
+                    }
+                    self.cur_storage_class = StorageClass::Extern;
+                    self.advance();
+                }
+                TokenKind::KwSigned | TokenKind::KwUnsigned | TokenKind::KwConst => {
+                    self.advance(); // consume as no-op qualifier
+                }
+                _ => break,
             }
-            TokenKind::KwExtern => {
-                self.cur_storage_class = StorageClass::Extern;
-                self.advance();
-            }
-            _ => {}
         }
         let name = self.expect_ident()?;
         let mut dims = Vec::new();
@@ -324,6 +365,10 @@ impl Parser {
         }
         for &dim in dims.iter().rev() {
             ty = Type::Array(Box::new(ty), dim);
+        }
+        if !dims.is_empty() && *self.peek() == TokenKind::LParen {
+            let (l, c) = self.cur_lc();
+            return Err(ParseError::new(l, c, "array of functions is not permitted"));
         }
         Ok((ty, name))
     }
@@ -384,7 +429,11 @@ impl Parser {
                 funcs.push(func);
             } else {
                 let init = if self.eat(&TokenKind::Assign) {
-                    Some(self.parse_assign_expr()?)
+                    if *self.peek() == TokenKind::LBrace {
+                        Some(self.parse_init_list()?)
+                    } else {
+                        Some(self.parse_assign_expr()?)
+                    }
                 } else {
                     None
                 };
@@ -404,8 +453,17 @@ impl Parser {
         let mut fields = Vec::new();
         while *self.peek() != TokenKind::RBrace && *self.peek() != TokenKind::Eof {
             let (ty, fname) = self.parse_typed_decl()?;
+            let sc = std::mem::replace(&mut self.cur_storage_class, StorageClass::None);
+            if sc != StorageClass::None {
+                let (l, c) = self.cur_lc();
+                return Err(ParseError::new(l, c, "storage class not allowed in struct member"));
+            }
             self.expect(&TokenKind::Semicolon)?;
             fields.push((ty, fname));
+        }
+        if fields.is_empty() {
+            let (l, c) = self.cur_lc();
+            return Err(ParseError::new(l, c, "struct has no members"));
         }
         self.expect(&TokenKind::RBrace)?;
         self.expect(&TokenKind::Semicolon)?;
@@ -448,6 +506,19 @@ impl Parser {
                         break;
                     }
                     let (ty, pname) = self.parse_typed_decl()?;
+                    let sc = std::mem::replace(&mut self.cur_storage_class, StorageClass::None);
+                    if sc != StorageClass::None {
+                        let (l, c) = self.cur_lc();
+                        return Err(ParseError::new(l, c, "storage class not allowed in parameter declaration"));
+                    }
+                    if ty == Type::Void {
+                        let (l, c) = self.cur_lc();
+                        return Err(ParseError::new(l, c, "parameter cannot have void type"));
+                    }
+                    if params.iter().any(|(_, existing)| existing == &pname) {
+                        let (l, c) = self.cur_lc();
+                        return Err(ParseError::new(l, c, format!("duplicate parameter name '{}'", pname)));
+                    }
                     params.push((ty, pname));
                     if !self.eat(&TokenKind::Comma) { break; }
                 }
@@ -472,6 +543,14 @@ impl Parser {
         Ok(stmts)
     }
 
+    fn parse_body_stmt(&mut self) -> Result<Stmt, ParseError> {
+        if self.is_type_start() {
+            let (l, c) = self.cur_lc();
+            return Err(ParseError::new(l, c, "declaration not allowed as statement body"));
+        }
+        self.parse_stmt()
+    }
+
     // ── Statements ────────────────────────────────────────────────────────
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -486,9 +565,9 @@ impl Parser {
                 self.expect(&TokenKind::LParen)?;
                 let cond = self.parse_expr()?;
                 self.expect(&TokenKind::RParen)?;
-                let then = Box::new(self.parse_stmt()?);
+                let then = Box::new(self.parse_body_stmt()?);
                 let els = if self.eat(&TokenKind::KwElse) {
-                    Some(Box::new(self.parse_stmt()?))
+                    Some(Box::new(self.parse_body_stmt()?))
                 } else {
                     None
                 };
@@ -499,7 +578,7 @@ impl Parser {
                 self.expect(&TokenKind::LParen)?;
                 let cond = self.parse_expr()?;
                 self.expect(&TokenKind::RParen)?;
-                let body = Box::new(self.parse_stmt()?);
+                let body = Box::new(self.parse_body_stmt()?);
                 Ok(Stmt::While(cond, body))
             }
             TokenKind::KwFor => {
@@ -510,9 +589,10 @@ impl Parser {
                     self.advance();
                     None
                 } else if self.is_type_start() {
-                    let s = self.parse_decl_stmt()?;
-                    // parse_decl_stmt already consumed the semicolon
-                    Some(Box::new(s))
+                    self.in_for_init = true;
+                    let parsed = self.parse_decl_stmt();
+                    self.in_for_init = false;
+                    Some(Box::new(parsed?))
                 } else {
                     let e = self.parse_expr()?;
                     self.expect(&TokenKind::Semicolon)?;
@@ -530,7 +610,7 @@ impl Parser {
                     Some(self.parse_expr()?)
                 };
                 self.expect(&TokenKind::RParen)?;
-                let body = Box::new(self.parse_stmt()?);
+                let body = Box::new(self.parse_body_stmt()?);
                 Ok(Stmt::For { init, cond, incr, body })
             }
             TokenKind::KwReturn => {
@@ -545,7 +625,7 @@ impl Parser {
             }
             TokenKind::KwDo => {
                 self.advance();
-                let body = Box::new(self.parse_stmt()?);
+                let body = Box::new(self.parse_body_stmt()?);
                 self.expect(&TokenKind::KwWhile)?;
                 self.expect(&TokenKind::LParen)?;
                 let cond = self.parse_expr()?;
@@ -568,8 +648,15 @@ impl Parser {
                 self.expect(&TokenKind::LParen)?;
                 let expr = self.parse_expr()?;
                 self.expect(&TokenKind::RParen)?;
-                self.expect(&TokenKind::LBrace)?;
-                let arms = self.parse_switch_body()?;
+                let arms = if self.eat(&TokenKind::LBrace) {
+                    self.parse_switch_body()?
+                } else if self.eat(&TokenKind::Semicolon) {
+                    // switch(expr); — evaluate and discard, no arms
+                    Vec::new()
+                } else {
+                    // switch(expr) case N: stmt; or switch(expr) return 0; etc.
+                    self.parse_switch_braceless_body()?
+                };
                 Ok(Stmt::Switch { expr, arms })
             }
             TokenKind::KwTypedef => {
@@ -593,7 +680,7 @@ impl Parser {
             TokenKind::Ident(name) if *self.peek_at(1) == TokenKind::Colon => {
                 self.advance(); // consume ident
                 self.advance(); // consume ':'
-                let stmt = self.parse_stmt()?;
+                let stmt = self.parse_body_stmt()?;
                 Ok(Stmt::Label(name, Box::new(stmt)))
             }
             _ if self.is_type_start() => self.parse_decl_stmt(),
@@ -638,8 +725,20 @@ impl Parser {
         self.cur_storage_class = StorageClass::None;
         let (ty, name) = self.parse_typed_decl()?;
         let sc = std::mem::replace(&mut self.cur_storage_class, StorageClass::None);
+        if self.in_for_init && matches!(sc, StorageClass::Static | StorageClass::Extern) {
+            let (l, c) = self.cur_lc();
+            return Err(ParseError::new(l, c, "storage class not allowed in for-loop initializer"));
+        }
         // Local function declaration: `int foo(int a);` or `int extern foo(void);`
         if *self.peek() == TokenKind::LParen {
+            if self.in_for_init {
+                let (l, c) = self.cur_lc();
+                return Err(ParseError::new(l, c, "function declaration not allowed in for-loop initializer"));
+            }
+            if sc == StorageClass::Static {
+                let (l, c) = self.cur_lc();
+                return Err(ParseError::new(l, c, "'static' not allowed on local function declaration"));
+            }
             let _ = self.parse_func_rest(ty, name)?;
             return Ok(Stmt::Block(vec![]));
         }
@@ -658,6 +757,10 @@ impl Parser {
 
     fn parse_init_list(&mut self) -> Result<Expr, ParseError> {
         self.expect(&TokenKind::LBrace)?;
+        if *self.peek() == TokenKind::RBrace {
+            let (l, c) = self.cur_lc();
+            return Err(ParseError::new(l, c, "empty initializer list not allowed"));
+        }
         let mut items = Vec::new();
         if *self.peek() != TokenKind::RBrace {
             loop {
@@ -687,6 +790,10 @@ impl Parser {
                 }
             }
             if labels.is_empty() { break; }
+            if self.is_type_start() {
+                let (l, c) = self.cur_lc();
+                return Err(ParseError::new(l, c, "declaration not allowed immediately after case/default label"));
+            }
             let mut stmts = Vec::new();
             while !matches!(self.peek(), TokenKind::RBrace | TokenKind::KwCase | TokenKind::KwDefault | TokenKind::Eof) {
                 stmts.push(self.parse_stmt()?);
@@ -695,6 +802,26 @@ impl Parser {
         }
         self.expect(&TokenKind::RBrace)?;
         Ok(arms)
+    }
+
+    /// Parse a braceless switch body: zero or more case/default labels + one statement.
+    /// Handles: `switch(x) case N: stmt`, `switch(x) default: stmt`, `switch(x) stmt`
+    fn parse_switch_braceless_body(&mut self) -> Result<Vec<SwitchArm>, ParseError> {
+        let mut labels = Vec::new();
+        while matches!(self.peek(), TokenKind::KwCase | TokenKind::KwDefault) {
+            if *self.peek() == TokenKind::KwCase {
+                self.advance();
+                let val = self.parse_const_int_signed()?;
+                self.expect(&TokenKind::Colon)?;
+                labels.push(SwitchLabel::Case(val));
+            } else {
+                self.advance();
+                self.expect(&TokenKind::Colon)?;
+                labels.push(SwitchLabel::Default);
+            }
+        }
+        let stmt = self.parse_stmt()?;
+        Ok(vec![SwitchArm { labels, stmts: vec![stmt] }])
     }
 
     // ── Expressions ───────────────────────────────────────────────────────
@@ -892,16 +1019,22 @@ impl Parser {
             return Ok(Expr::UnOp(UnOp::Deref, Box::new(self.parse_unary_expr()?)));
         }
         if self.eat(&TokenKind::KwSizeof) {
-            self.expect(&TokenKind::LParen)?;
-            // If the token inside parens looks like a type keyword or typedef, parse as
-            // sizeof(type). Otherwise parse as sizeof(expr) — e.g. sizeof(variable).
-            if self.is_type_start() {
-                let ty = self.parse_type()?;
-                self.expect(&TokenKind::RParen)?;
-                return Ok(Expr::Sizeof(ty));
+            if *self.peek() == TokenKind::LParen {
+                self.expect(&TokenKind::LParen)?;
+                // If the token inside parens looks like a type keyword or typedef, parse as
+                // sizeof(type). Otherwise parse as sizeof(expr) — e.g. sizeof(variable).
+                if self.is_type_start() {
+                    let ty = self.parse_type()?;
+                    self.expect(&TokenKind::RParen)?;
+                    return Ok(Expr::Sizeof(ty));
+                } else {
+                    let e = self.parse_expr()?;
+                    self.expect(&TokenKind::RParen)?;
+                    return Ok(Expr::SizeofExpr(Box::new(e)));
+                }
             } else {
-                let e = self.parse_expr()?;
-                self.expect(&TokenKind::RParen)?;
+                // sizeof expr without parens — parse at unary precedence
+                let e = self.parse_unary_expr()?;
                 return Ok(Expr::SizeofExpr(Box::new(e)));
             }
         }

@@ -18,6 +18,46 @@ impl LexError {
     }
 }
 
+fn validate_int_suffix(suffix: &[u8]) -> bool {
+    let n = suffix.len();
+    if n == 0 { return true; }
+    let mut u_count = 0u32;
+    let mut l_count = 0u32;
+    let mut first_u: Option<usize> = None;
+    let mut first_l: Option<usize> = None;
+    let mut last_l: Option<usize> = None;
+    for (i, &b) in suffix.iter().enumerate() {
+        match b {
+            b'u' | b'U' => {
+                u_count += 1;
+                if first_u.is_none() {
+                    first_u = Some(i);
+                }
+            }
+            b'l' | b'L' => {
+                l_count += 1;
+                if first_l.is_none() {
+                    first_l = Some(i);
+                }
+                last_l = Some(i);
+            }
+            _ => return false,
+        }
+    }
+    if u_count > 1 || l_count > 2 {
+        return false;
+    }
+    if u_count == 1 && l_count == 2 {
+        let up = first_u.unwrap();
+        let l1 = first_l.unwrap();
+        let l2 = last_l.unwrap();
+        if !(up < l1) && !(up > l2) {
+            return false;
+        }
+    }
+    true
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // Literals
@@ -116,7 +156,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut pos = 0;
     let mut tokens = Vec::new();
 
-    // Precompute line-start byte offsets for O(log n) pos → (line, col).
+    // Precompute line-start byte offsets for O(log n) pos â†’ (line, col).
     let line_starts: Vec<usize> = std::iter::once(0)
         .chain(bytes.iter().enumerate().filter_map(
             |(i, &b)| {
@@ -164,7 +204,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         let (sl, sc) = pos_to_lc(start);
         let kind = match bytes[pos] {
             b'0'..=b'9' => {
-                // Hex literal: 0x… or 0X…
+                // Hex literal: 0xâ€¦ or 0Xâ€¦
                 if bytes[pos] == b'0'
                     && pos + 1 < bytes.len()
                     && (bytes[pos + 1] == b'x' || bytes[pos + 1] == b'X')
@@ -178,9 +218,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                         return Err(LexError::new(sl, sc, "expected hex digits after '0x'"));
                     }
                     let hex_end = pos;
-                    // Strip integer suffixes (u, U, l, L) — e.g. 0xFFul
+                    let suf_start = pos;
                     while pos < bytes.len() && matches!(bytes[pos], b'u' | b'U' | b'l' | b'L') {
                         pos += 1;
+                    }
+                    if !validate_int_suffix(&bytes[suf_start..pos]) {
+                        return Err(LexError::new(sl, sc, "invalid integer suffix"));
                     }
                     let n = i32::from_str_radix(&source[hex_start..hex_end], 16)
                         .map_err(|_| LexError::new(sl, sc, "hex literal out of range"))?;
@@ -196,9 +239,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     pos += 1;
                 }
                 let digit_end = pos;
-                // Strip integer suffixes (u, U, l, L) — e.g. 100l, 42UL
+                let suf_start = pos;
                 while pos < bytes.len() && matches!(bytes[pos], b'u' | b'U' | b'l' | b'L') {
                     pos += 1;
+                }
+                if !validate_int_suffix(&bytes[suf_start..pos]) {
+                    return Err(LexError::new(sl, sc, "invalid integer suffix"));
                 }
                 let n: i32 = source[start..digit_end]
                     .parse()
@@ -255,6 +301,9 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             }
             b'\'' => {
                 pos += 1;
+                if pos < bytes.len() && bytes[pos] == b'\'' {
+                    return Err(LexError::new(sl, sc, "empty or invalid character literal"));
+                }
                 let ch = lex_char_escape(bytes, &mut pos).map_err(|e| LexError::new(sl, sc, e))?;
                 if pos >= bytes.len() || bytes[pos] != b'\'' {
                     return Err(LexError::new(sl, sc, "unterminated char literal"));
