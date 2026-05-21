@@ -48,6 +48,9 @@ struct Cli {
     #[arg(long = "map", short = 'm', value_name = "PATH", num_args = 0..=1,
           default_missing_value = "")]
     map: Option<String>,
+    /// Emit debug information alongside the output (.pdb file for source-level debugging).
+    #[arg(short = 'g', long = "debug")]
+    debug: bool,
 }
 
 fn main() {
@@ -72,13 +75,15 @@ fn main() {
             include_dirs: cli.include_dirs.clone(),
             defines: c_defines,
             lib_dirs: Vec::new(), // not needed for object compilation
+            debug: cli.debug,
         };
         for input in &cli.inputs {
             let src = std::fs::read_to_string(input).unwrap_or_else(|e| {
                 eprintln!("error reading {:?}: {}", input, e);
                 std::process::exit(1);
             });
-            let obj_s = hack_cc::compile_to_object_with_options(&src, input.parent(), &c_opts).unwrap_or_else(|e| {
+            let debug_name = if cli.debug { input.to_str() } else { None };
+            let obj_s = hack_cc::compile_to_object_with_options(&src, input.parent(), &c_opts, debug_name).unwrap_or_else(|e| {
                 eprintln!("compile error in {:?}: {}", input, e);
                 std::process::exit(1);
             });
@@ -142,11 +147,12 @@ fn main() {
         include_dirs: cli.include_dirs.clone(),
         defines,
         lib_dirs,
+        debug: cli.debug,
     };
 
     let prog = {
-        let file_refs: Vec<(&str, Option<&std::path::Path>)> = sources.iter()
-            .map(|(src, path)| (src.as_str(), path.parent()))
+        let file_refs: Vec<(&str, Option<&std::path::Path>, Option<&str>)> = sources.iter()
+            .map(|(src, path)| (src.as_str(), path.parent(), path.to_str()))
             .collect();
         hack_cc::compile_and_link(&file_refs, &opts, fmt)
     }.unwrap_or_else(|e| {
@@ -183,6 +189,10 @@ fn main() {
         println!("wrote {:?} and {:?}", out_path, hack_path);
     }
 
+    if cli.debug {
+        hack_cc::write_pdb(&prog.asm, &sources, &cli.inputs, &out_path);
+    }
+
     if let Some(map_arg) = &cli.map {
         let source_names: Vec<&str> = cli.inputs.iter()
             .map(|p| p.file_name().and_then(|n| n.to_str()).unwrap_or("?"))
@@ -200,3 +210,4 @@ fn main() {
         eprintln!("wrote map {:?}", map_path);
     }
 }
+

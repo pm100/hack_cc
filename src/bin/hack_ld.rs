@@ -19,10 +19,11 @@
 ///   5. Emits the requested output format.
 
 use clap::Parser;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use hack_cc::output::{OutputFormat, emit};
 use hack_cc::codegen::{gen_bootstrap, gen_font_init_asm, gen_font_data_inits, CompiledProgram, DataInit};
-use hack_cc::linker::{link, default_lib_dirs};
+use hack_cc::linker::{link, link_debug, default_lib_dirs};
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum Format {
@@ -55,6 +56,9 @@ struct Cli {
     /// The map file uses the same base name as the output with a .map extension.
     #[arg(long = "map", short = 'm')]
     map: bool,
+    /// Emit debug information alongside the output (.pdb file for source-level debugging).
+    #[arg(short = 'g', long = "debug")]
+    debug: bool,
 }
 
 /// Metadata parsed from the leading directive lines of a `.s` object file.
@@ -187,7 +191,10 @@ fn main() {
     };
 
     // ── Step 4: Runtime symbol-scan linker ──────────────────────────────────
-    let first_pass = link(&build_combined(""), &lib_dirs);
+    let do_link = |asm: &str| -> String {
+        if cli.debug { link_debug(asm, &lib_dirs) } else { link(asm, &lib_dirs) }
+    };
+    let first_pass = do_link(&build_combined(""));
     let needs_font = first_pass.contains("(__draw_char)");
 
     let (linked_asm, mut font_data): (String, Vec<DataInit>) = if needs_font {
@@ -196,7 +203,7 @@ fn main() {
                 (first_pass, gen_font_data_inits())
             }
             _ => {
-                (link(&build_combined(&gen_font_init_asm()), &lib_dirs), Vec::new())
+                (do_link(&build_combined(&gen_font_init_asm())), Vec::new())
             }
         }
     } else {
@@ -256,5 +263,34 @@ fn main() {
             std::process::exit(1);
         });
         eprintln!("wrote map {:?}", map_path);
+    }
+
+    if cli.debug {
+        // Assemble the linked output to extract .dbg annotations.
+        let ar = match hack_cc::assembler::assemble_with_symbols(&prog.asm, 16) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("warning: could not assemble for PDB: {}", e);
+                std::process::exit(1);
+            }
+        };
+        // Collect unique C source file paths from .dbg entries (in first-seen order).
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut c_paths: Vec<PathBuf> = Vec::new();
+        for (_, file, _) in &ar.dbg_entries {
+            if !file.ends_with(".s") && !seen.contains(file) {
+                seen.insert(file.clone());
+                c_paths.push(PathBuf::from(file));
+            }
+        }
+        // Read source files from disk so their lines can be embedded.
+        let mut sources: Vec<(String, PathBuf)> = Vec::new();
+        for path in &c_paths {
+            match std::fs::read_to_string(path) {
+                Ok(text) => sources.push((text, path.clone())),
+                Err(e) => eprintln!("warning: could not read source {:?}: {}", path, e),
+            }
+        }
+        hack_cc::write_pdb(&prog.asm, &sources, &c_paths, &out_path);
     }
 }

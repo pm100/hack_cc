@@ -23,6 +23,8 @@ pub struct CompileOptions {
     pub defines: HashMap<String, String>,
     /// Library search directories for the linker.
     pub lib_dirs: Vec<PathBuf>,
+    /// Emit source-level debug info (`.dbg` directives) during codegen.
+    pub debug: bool,
 }
 
 impl Default for CompileOptions {
@@ -31,6 +33,7 @@ impl Default for CompileOptions {
             include_dirs: Vec::new(),
             defines: HashMap::new(),
             lib_dirs: linker::default_lib_dirs(),
+            debug: false,
         }
     }
 }
@@ -102,6 +105,7 @@ pub fn compile_to_object_with_options(
     source: &str,
     base_dir: Option<&std::path::Path>,
     opts: &CompileOptions,
+    debug_name: Option<&str>,
 ) -> Result<String, Error> {
     let expanded = preprocessor::preprocess_with_predefined(source, base_dir, &opts.include_dirs, &opts.defines)?;
     let tokens = lexer::lex(&expanded)?;
@@ -118,7 +122,15 @@ pub fn compile_to_object_with_options(
     let globals_info = sema_result.globals.clone();
     let struct_defs = sema_result.struct_defs.clone();
 
-    let compiled = codegen::generate_body_only(sema_result)?;
+    let compiled = if opts.debug {
+        if let Some(name) = debug_name {
+            codegen::generate_body_only_with_debug(sema_result, name.to_string())?
+        } else {
+            codegen::generate_body_only(sema_result)?
+        }
+    } else {
+        codegen::generate_body_only(sema_result)?
+    };
 
     let out = build_object_text(&provides, &string_literals, &globals_info, &struct_defs, &compiled);
     Ok(out)
@@ -275,7 +287,7 @@ fn build_object_text(
 /// table if needed), runs the runtime symbol-scan linker, and returns the
 /// final assembled program.
 fn link_objects(texts: &[String], lib_dirs: &[PathBuf]) -> Result<CompiledProgram, Error> {
-    link_objects_for_format(texts, lib_dirs, output::OutputFormat::Asm)
+    link_objects_for_format(texts, lib_dirs, output::OutputFormat::Asm, false)
 }
 
 /// Format-aware variant of [`link_objects`].
@@ -287,6 +299,7 @@ fn link_objects_for_format(
     texts: &[String],
     lib_dirs: &[PathBuf],
     fmt: output::OutputFormat,
+    debug: bool,
 ) -> Result<CompiledProgram, Error> {
     // 1. Parse .data entries from all objects (file order → allocation order)
     let mut data_entries: Vec<(String, i16)> = Vec::new();
@@ -327,7 +340,8 @@ fn link_objects_for_format(
     };
     let bootstrap = codegen::gen_bootstrap(&init_code, sp_base);
     let combined = format!("{}\n{}", bootstrap, combined_bodies);
-    let linked = linker::link(&combined, lib_dirs);
+    let do_link = if debug { linker::link_debug } else { linker::link };
+    let linked = do_link(&combined, lib_dirs);
 
     // Pre-computed DataInits for string literals and globals (Hackem/Tst only).
     // Addresses are deterministic: entry[i] → RAM[16 + i] (assembler allocates
@@ -359,7 +373,7 @@ fn link_objects_for_format(
                 full_init.push_str(&codegen::gen_font_init_asm());
                 let full_bootstrap = codegen::gen_bootstrap(&full_init, sp_base);
                 let combined2 = format!("{}\n{}", full_bootstrap, combined_bodies);
-                (linker::link(&combined2, lib_dirs), Vec::new())
+                (do_link(&combined2, lib_dirs), Vec::new())
             }
         }
     } else {
@@ -378,13 +392,16 @@ fn link_objects_for_format(
 /// the same two-step (compile-to-object then link) path as `hack_cc -c` +
 /// `hack_ld`.  The `fmt` parameter controls font-table handling so that
 /// `Hackem`/`Tst` output never embeds font init code in the bootstrap ROM.
+///
+/// Each tuple is `(source_text, base_dir, debug_name)`. `debug_name` is the
+/// source file path emitted in `.dbg` directives when `opts.debug` is true.
 pub fn compile_and_link(
-    files: &[(&str, Option<&std::path::Path>)],
+    files: &[(&str, Option<&std::path::Path>, Option<&str>)],
     opts: &CompileOptions,
     fmt: output::OutputFormat,
 ) -> Result<CompiledProgram, Error> {
     let mut objects: Vec<String> = Vec::new();
-    for (source, base_dir) in files {
+    for (source, base_dir, debug_name) in files {
         let expanded = preprocessor::preprocess_with_predefined(source, *base_dir, &opts.include_dirs, &opts.defines)?;
         let tokens = lexer::lex(&expanded)?;
         let program = parser::parse(tokens)?;
@@ -396,10 +413,18 @@ pub fn compile_and_link(
         let string_literals = sema_result.string_literals.clone();
         let globals_info = sema_result.globals.clone();
         let struct_defs = sema_result.struct_defs.clone();
-        let compiled = codegen::generate_body_only(sema_result)?;
+        let compiled = if opts.debug {
+            if let Some(name) = debug_name {
+                codegen::generate_body_only_with_debug(sema_result, name.to_string())?
+            } else {
+                codegen::generate_body_only(sema_result)?
+            }
+        } else {
+            codegen::generate_body_only(sema_result)?
+        };
         objects.push(build_object_text(&provides, &string_literals, &globals_info, &struct_defs, &compiled));
     }
-    link_objects_for_format(&objects, &opts.lib_dirs, fmt)
+    link_objects_for_format(&objects, &opts.lib_dirs, fmt, opts.debug)
 }
 
 
@@ -427,4 +452,138 @@ fn gen_data_init_code(entries: &[(String, i16)]) -> String {
         }
     }
     out
+}
+
+/// Escape a string for JSON serialization.
+pub fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"'  => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c    => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Build and write a `.pdb` JSON debug database alongside the output file.
+///
+/// * `asm`          – Final linked assembly text.
+/// * `sources`      – `(file_content, file_path)` pairs for primary C source files
+///                    whose lines should be embedded in the PDB.
+/// * `input_paths`  – Command-line source file paths; these seed the `file_info`
+///                    ordering so they appear first (file index 0, 1, …).
+/// * `out_path`     – Output binary path; `.pdb` is written alongside it.
+pub fn write_pdb(
+    asm: &str,
+    sources: &[(String, PathBuf)],
+    input_paths: &[PathBuf],
+    out_path: &std::path::Path,
+) {
+    let ar = match assembler::assemble_with_symbols(asm, 16) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("warning: could not assemble for PDB: {}", e);
+            return;
+        }
+    };
+
+    // Build file_info list: primary sources first, then any extras from .dbg entries.
+    let mut file_names: Vec<String> = Vec::new();
+    let mut file_index: HashMap<String, usize> = HashMap::new();
+    for p in input_paths {
+        if let Some(s) = p.to_str() {
+            if !file_index.contains_key(s) {
+                let idx = file_names.len();
+                file_index.insert(s.to_string(), idx);
+                file_names.push(s.to_string());
+            }
+        }
+    }
+    for (_, file, _) in &ar.dbg_entries {
+        if !file_index.contains_key(file) {
+            let idx = file_names.len();
+            file_index.insert(file.clone(), idx);
+            file_names.push(file.clone());
+        }
+    }
+
+    // source_lines: flat list of all lines from the primary source files.
+    let mut source_lines: Vec<String> = Vec::new();
+    for (src_text, path) in sources {
+        if let Some(name) = path.to_str() {
+            if file_index.contains_key(name) {
+                for line in src_text.lines() {
+                    source_lines.push(line.to_string());
+                }
+            }
+        }
+    }
+
+    // source_map: one entry per .dbg annotation.
+    let mut source_map_entries: Vec<(usize, usize, usize, u16)> = Vec::new();
+    for (addr, file, line_no) in &ar.dbg_entries {
+        if let Some(&fi) = file_index.get(file) {
+            source_map_entries.push((fi, *line_no as usize, 0, *addr));
+        }
+    }
+
+    // symbols: ROM labels → Func, RAM vars → Var.
+    let mut symbols_json = String::new();
+    for (name, addr) in &ar.rom_labels {
+        let sym = format!(
+            r#"{{"symbol_type":"Func","name":{},"func_type":0,"var_type":0,"storage_class":0,"size":0,"address":{},"instance_type":"","file_type":"C"}}"#,
+            json_str(name), addr
+        );
+        if !symbols_json.is_empty() { symbols_json.push(','); }
+        symbols_json.push_str(&sym);
+    }
+    for (name, addr) in &ar.ram_vars {
+        let sym = format!(
+            r#"{{"symbol_type":"Var","name":{},"func_type":0,"var_type":0,"storage_class":0,"size":1,"address":{},"instance_type":"","file_type":"C"}}"#,
+            json_str(name), addr
+        );
+        if !symbols_json.is_empty() { symbols_json.push(','); }
+        symbols_json.push_str(&sym);
+    }
+
+    let mut file_info_json = String::new();
+    for name in &file_names {
+        if !file_info_json.is_empty() { file_info_json.push(','); }
+        let ft = if name.ends_with(".s") { "Asm" } else { "C" };
+        file_info_json.push_str(&format!(
+            r#"{{"name":{},"file_type":"{}"}}"#,
+            json_str(name), ft
+        ));
+    }
+
+    let source_lines_json: String = source_lines.iter()
+        .map(|l| json_str(l))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let source_map_json: String = source_map_entries.iter()
+        .map(|(fi, ln, col, addr)| format!(
+            r#"{{"file":{},"line_no":{},"col_no":{},"addr":{}}}"#,
+            fi, ln, col, addr
+        ))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let pdb_json = format!(
+        "{{\n  \"symbols\": [{}],\n  \"source_lines\": [{}],\n  \"source_map\": [{}],\n  \"file_info\": [{}]\n}}\n",
+        symbols_json, source_lines_json, source_map_json, file_info_json
+    );
+
+    let pdb_path = out_path.with_extension("pdb");
+    std::fs::write(&pdb_path, &pdb_json).unwrap_or_else(|e| {
+        eprintln!("error writing PDB {:?}: {}", pdb_path, e);
+    });
+    eprintln!("wrote debug info {:?}", pdb_path);
 }
