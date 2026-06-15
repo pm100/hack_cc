@@ -64,7 +64,7 @@ pub struct SemaResult {
 pub fn type_size(ty: &Type, defs: &HashMap<String, Vec<(String, Type)>>) -> usize {
     match ty {
         Type::Void => 0,
-        Type::Int | Type::Char | Type::UnsignedChar | Type::Ptr(_) => 1,
+        Type::Int | Type::Char | Type::SignedChar | Type::UnsignedChar | Type::Ptr(_) => 1,
         Type::Long => 2,
         Type::Array(base, n) => type_size(base, defs) * n,
         Type::Struct(name) => {
@@ -87,6 +87,14 @@ pub fn analyze_for_object_file(prog: Program, user_externals: &[&str]) -> Result
     analyze_impl(prog, user_externals)
 }
 
+/// In C, array parameters are adjusted to pointer-to-element.  e.g. `int a[2][3]` → `Ptr(Array(Int, 3))`
+fn adjust_param_type(ty: &Type) -> Type {
+    match ty {
+        Type::Array(inner, _) => Type::Ptr(inner.clone()),
+        other => other.clone(),
+    }
+}
+
 fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, SemaError> {
     // Build struct definition map: name -> [(field_name, field_type)]
     let mut struct_defs: HashMap<String, Vec<(String, Type)>> = HashMap::new();
@@ -94,6 +102,21 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
         let fields: Vec<(String, Type)> = sd.fields.iter()
             .map(|(ty, name)| (name.clone(), ty.clone()))
             .collect();
+        // Validate struct members
+        for (field_name, field_ty) in &fields {
+            if *field_ty == Type::Void {
+                return Err(SemaError::new(format!(
+                    "struct '{}' member '{}' has incomplete type void", sd.name, field_name
+                )));
+            }
+            if let Type::Struct(member_struct) = field_ty {
+                if *member_struct == sd.name {
+                    return Err(SemaError::new(format!(
+                        "struct '{}' cannot contain a member of its own type (incomplete type)", sd.name
+                    )));
+                }
+            }
+        }
         struct_defs.insert(sd.name.clone(), fields);
     }
 
@@ -183,6 +206,16 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
             if existing.1 != f.params.len() && !was_variadic {
                 return Err(SemaError::new(format!("conflicting parameter count for function '{}'", f.name)));
             }
+            // Check that parameter types are compatible (with array->pointer adjustment)
+            if !was_variadic {
+                if let Some(existing_params) = func_params.get(&f.name) {
+                    let old_adj: Vec<Type> = existing_params.iter().map(adjust_param_type).collect();
+                    let new_adj: Vec<Type> = f.params.iter().map(|(ty, _)| adjust_param_type(ty)).collect();
+                    if old_adj != new_adj {
+                        return Err(SemaError::new(format!("conflicting parameter types for function '{}'", f.name)));
+                    }
+                }
+            }
             if let Some(&was_static) = func_linkage.get(&f.name) {
                 if was_static != f.is_static {
                     return Err(SemaError::new(format!("conflicting linkage for function '{}'", f.name)));
@@ -196,6 +229,14 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
                 }
             }
         } else {
+            // Check for void array param types (e.g., void foo[3]) — element type cannot be void
+            for (ty, _) in &f.params {
+                if let Type::Array(inner, _) = ty {
+                    if **inner == Type::Void {
+                        return Err(SemaError::new("array element type cannot be void (incomplete type)"));
+                    }
+                }
+            }
             func_sigs.insert(f.name.clone(), (f.ret_ty.clone(), f.params.len()));
             func_params.insert(f.name.clone(), f.params.iter().map(|(ty, _)| ty.clone()).collect());
             func_linkage.insert(f.name.clone(), f.is_static);
@@ -243,40 +284,83 @@ fn eval_const(expr: &Expr) -> Result<i32, SemaError> {
 }
 
 /// Evaluate a global-variable initializer expression, returning a `GlobalInit`.
-/// Scalars â†’ `GlobalInit::Scalar(n)`.
-/// `{...}` lists â†’ `GlobalInit::Array(vec![...])`.
+/// Scalars → `GlobalInit::Scalar(n)`.
+/// `{...}` lists → `GlobalInit::Array(vec![...])`.
 fn eval_global_init(expr: &Expr, ty: &Type) -> Result<GlobalInit, SemaError> {
     match expr {
         Expr::InitList(items) => {
-            // Scalar initialized with multi-item compound initializer is an error.
-            if !matches!(ty, Type::Array(_, _)) && items.len() > 1 {
-                return Err(SemaError::new("too many values in initializer for scalar type"));
-            }
-            // Array initialized with too many items is an error.
-            if let Type::Array(_, n) = ty {
+            if let Type::Array(elem_ty, n) = ty {
+                // Validate element count
                 if *n > 0 && items.len() > *n {
                     return Err(SemaError::new(format!(
                         "too many initializers for array (expected at most {}, got {})", n, items.len()
                     )));
                 }
-            }
-            let mut vals = Vec::new();
-            for item in items {
-                match item {
-                    // String literal element: copy char values + implicit 0 padding handled at codegen
-                    Expr::StringLit(s) => {
-                        for b in s.bytes() { vals.push(b as i32); }
-                        vals.push(0); // null terminator
-                    }
-                    other => vals.push(eval_const(other)?),
+                // Validate each element against the element type
+                for item in items.iter() {
+                    check_array_element_init(elem_ty, item)?;
+                }
+                let elem_flat_size = flat_size_of(elem_ty);
+                let mut vals: Vec<i32> = Vec::new();
+                for item in items {
+                    let before = vals.len();
+                    flatten_init_item(item, elem_ty, &mut vals)?;
+                    // Zero-pad each element to its flat size
+                    let filled = vals.len() - before;
+                    for _ in filled..elem_flat_size { vals.push(0); }
+                }
+                // Zero-pad to the full declared array size
+                if *n > 0 {
+                    let total = n * elem_flat_size.max(1);
+                    while vals.len() < total { vals.push(0); }
+                }
+                Ok(GlobalInit::Array(vals))
+            } else {
+                // Scalar with initializer list — only single-element form is valid.
+                if items.len() > 1 {
+                    return Err(SemaError::new("too many values in initializer for scalar type"));
+                }
+                if let Some(item) = items.first() {
+                    let val = eval_const(item)?;
+                    Ok(GlobalInit::Scalar(val))
+                } else {
+                    Ok(GlobalInit::Scalar(0))
                 }
             }
-            Ok(GlobalInit::Array(vals))
+        }
+        Expr::StringLit(s) => {
+            // Top-level string literal initializer for a char array.
+            // The lexer already appended '\0' to s — do NOT add another one.
+            if let Type::Array(elem_ty, n) = ty {
+                if !is_char_type(elem_ty) {
+                    return Err(SemaError::new("string literal can only initialize a char array"));
+                }
+                let bytes: Vec<i32> = s.bytes().map(|b| b as i32).collect();
+                let content_len = bytes.len().saturating_sub(1); // chars without null
+                if *n > 0 && content_len > *n {
+                    return Err(SemaError::new(format!(
+                        "string initializer too long ({} chars) for array of size {}", content_len, n
+                    )));
+                }
+                // Truncate to declared size (this naturally omits null when array is exactly full)
+                let take = if *n == 0 { bytes.len() } else { (*n).min(bytes.len()) };
+                let mut vals: Vec<i32> = bytes[..take].to_vec();
+                if *n > 0 {
+                    while vals.len() < *n { vals.push(0); }
+                }
+                Ok(GlobalInit::Array(vals))
+            } else {
+                Err(SemaError::new("string literal cannot initialize non-array type"))
+            }
         }
         other => {
             // Array type cannot be initialized with a scalar expression.
             if matches!(ty, Type::Array(_, _)) {
                 return Err(SemaError::new("array must be initialized with a compound initializer"));
+            }
+            // Struct type cannot be initialized with a scalar expression.
+            if matches!(ty, Type::Struct(_)) {
+                return Err(SemaError::new("struct type must be initialized with a compound initializer"));
             }
             let val = eval_const(other)?;
             if matches!(ty, Type::Ptr(_)) && val != 0 {
@@ -285,6 +369,51 @@ fn eval_global_init(expr: &Expr, ty: &Type) -> Result<GlobalInit, SemaError> {
             Ok(GlobalInit::Scalar(val))
         }
     }
+}
+
+/// Returns the total number of flat scalar words in a type, ignoring struct_defs
+/// (structs are treated as 1 word each — sufficient for char array cases).
+fn flat_size_of(ty: &Type) -> usize {
+    match ty {
+        Type::Array(inner, n) => n * flat_size_of(inner).max(1),
+        _ => 1,
+    }
+}
+
+/// Flatten one initializer item of `elem_ty` into `vals`.
+/// The caller is responsible for zero-padding to `flat_size_of(elem_ty)`.
+fn flatten_init_item(item: &Expr, elem_ty: &Type, vals: &mut Vec<i32>) -> Result<(), SemaError> {
+    match (elem_ty, item) {
+        // Inner char array initialized from a string literal
+        (Type::Array(char_ty, inner_n), Expr::StringLit(s)) if is_char_type(char_ty) => {
+            let bytes: Vec<i32> = s.bytes().map(|b| b as i32).collect();
+            // Truncate to the inner array's declared size (omit null when no room)
+            let take = (*inner_n).min(bytes.len());
+            for b in &bytes[..take] { vals.push(*b); }
+            // Zero-padding to inner_n is done by the caller loop
+        }
+        // Nested compound initializer → recurse
+        (Type::Array(sub_elem_ty, sub_n), Expr::InitList(sub_items)) => {
+            let sub_elem_size = flat_size_of(sub_elem_ty);
+            let before = vals.len();
+            for sub_item in sub_items.iter() {
+                let sb = vals.len();
+                flatten_init_item(sub_item, sub_elem_ty, vals)?;
+                let filled = vals.len() - sb;
+                for _ in filled..sub_elem_size.max(1) { vals.push(0); }
+            }
+            // Pad to the full inner array size
+            if *sub_n > 0 {
+                let expected = before + sub_n * sub_elem_size.max(1);
+                while vals.len() < expected { vals.push(0); }
+            }
+        }
+        // Scalar element
+        _ => {
+            vals.push(eval_const(item)?);
+        }
+    }
+    Ok(())
 }
 
 fn check_calls_defined_ext(
@@ -331,6 +460,7 @@ fn check_calls_stmt_ext(stmt: &Stmt, defined: &HashSet<String>, builtins: &[&str
             }
         }
         Stmt::Break | Stmt::Continue => {}
+        Stmt::Source(_, inner) => check_calls_stmt_ext(inner, defined, builtins, externals)?,
         _ => {}
     }
     Ok(())
@@ -423,6 +553,7 @@ fn check_call_arity_stmt(
             }
         }
         Stmt::Label(_, inner) => check_call_arity_stmt(inner, func_sigs, variadic)?,
+        Stmt::Source(_, inner) => check_call_arity_stmt(inner, func_sigs, variadic)?,
         Stmt::Break | Stmt::Continue | Stmt::Return(None) | Stmt::Goto(_) => {}
     }
     Ok(())
@@ -594,6 +725,7 @@ fn check_sf_stmt(
             }
             ss.pop();
         }
+        Stmt::Source(_, inner) => check_sf_stmt(inner, ss, globals, func_sigs, can_break, can_continue)?,
     }
     Ok(())
 }
@@ -704,6 +836,7 @@ fn collect_labels_gotos_stmt(
                 collect_labels_gotos_stmts(&arm.stmts, labels, gotos)?;
             }
         }
+        Stmt::Source(_, inner) => collect_labels_gotos_stmt(inner, labels, gotos)?,
         _ => {}
     }
     Ok(())
@@ -755,6 +888,7 @@ fn check_dup_cases_stmt(stmt: &Stmt) -> Result<(), SemaError> {
             check_dup_cases_stmt(body)?;
         }
         Stmt::Label(_, inner) => check_dup_cases_stmt(inner)?,
+        Stmt::Source(_, inner) => check_dup_cases_stmt(inner)?,
         _ => {}
     }
     Ok(())
@@ -822,7 +956,17 @@ fn type_of_expr(
                 .map(|(_, t)| t.clone())
                 .unwrap_or(Type::Int)
         }
-        Expr::Ternary(_, t, _) => type_of_expr(t, vars, func_sigs, struct_defs),
+        Expr::Ternary(_, t, e) => {
+            let tt = type_of_expr(t, vars, func_sigs, struct_defs);
+            let et = type_of_expr(e, vars, func_sigs, struct_defs);
+            // When one branch is void* and the other is a non-void pointer, result is void*
+            if let (Type::Ptr(ti), Type::Ptr(ei)) = (&tt, &et) {
+                if **ti == Type::Void || **ei == Type::Void {
+                    return Type::Ptr(Box::new(Type::Void));
+                }
+            }
+            tt
+        }
         Expr::PostInc(e) | Expr::PostDec(e) => type_of_expr(e, vars, func_sigs, struct_defs),
         Expr::InitList(_) => Type::Int,
         Expr::Sizeof(_) | Expr::SizeofExpr(_) => Type::Int,
@@ -835,6 +979,10 @@ fn is_pointer_or_array(ty: &Type) -> bool {
 
 fn is_struct(ty: &Type) -> bool {
     matches!(ty, Type::Struct(_))
+}
+
+fn is_char_type(ty: &Type) -> bool {
+    matches!(ty, Type::Char | Type::SignedChar | Type::UnsignedChar)
 }
 
 fn check_types_expr(
@@ -855,10 +1003,16 @@ fn check_types_expr(
                     if is_struct(&et) {
                         return Err(SemaError::new("invalid operand: struct type in unary operation"));
                     }
+                    if et == Type::Void {
+                        return Err(SemaError::new("invalid operand: void type in arithmetic/bitwise operation"));
+                    }
                 }
                 UnOp::Not => {
                     if is_struct(&et) {
                         return Err(SemaError::new("invalid operand: struct in logical not"));
+                    }
+                    if et == Type::Void {
+                        return Err(SemaError::new("invalid operand: void type in logical not"));
                     }
                 }
                 UnOp::Deref => {
@@ -879,6 +1033,12 @@ fn check_types_expr(
                     if is_pointer_or_array(&lt) || is_pointer_or_array(&rt) {
                         return Err(SemaError::new("invalid operand: pointer type in multiply/divide/mod"));
                     }
+                    if matches!(op, BinOp::MulAssign | BinOp::DivAssign | BinOp::ModAssign) && is_struct(&lt) {
+                        return Err(SemaError::new("cannot apply compound assignment to struct type"));
+                    }
+                    if lt == Type::Void || rt == Type::Void {
+                        return Err(SemaError::new("invalid operand: void type in arithmetic operation"));
+                    }
                 }
                 BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr |
                 BinOp::AndAssign | BinOp::OrAssign | BinOp::XorAssign |
@@ -886,29 +1046,92 @@ fn check_types_expr(
                     if is_pointer_or_array(&lt) || is_pointer_or_array(&rt) {
                         return Err(SemaError::new("invalid operand: pointer type in bitwise operation"));
                     }
+                    if is_struct(&lt) || is_struct(&rt) {
+                        return Err(SemaError::new("invalid operand: struct type in bitwise/shift operation"));
+                    }
+                    if matches!(op, BinOp::AndAssign | BinOp::OrAssign | BinOp::XorAssign | BinOp::ShlAssign | BinOp::ShrAssign) && is_struct(&lt) {
+                        return Err(SemaError::new("cannot apply compound assignment to struct type"));
+                    }
+                    if lt == Type::Void || rt == Type::Void {
+                        return Err(SemaError::new("invalid operand: void type in bitwise/shift operation"));
+                    }
+                }
+                BinOp::And | BinOp::Or => {
+                    if is_struct(&lt) || is_struct(&rt) {
+                        return Err(SemaError::new("invalid operand: struct type in logical expression"));
+                    }
+                    if lt == Type::Void || rt == Type::Void {
+                        return Err(SemaError::new("invalid operand: void type in logical expression"));
+                    }
                 }
                 BinOp::Add | BinOp::AddAssign => {
                     if is_pointer_or_array(&lt) && is_pointer_or_array(&rt) {
                         return Err(SemaError::new("invalid operands: cannot add two pointers"));
                     }
-                    // Compound assign to array is illegal (array is not assignable)
+                    // Compound assign to array/struct is illegal
                     if *op == BinOp::AddAssign && matches!(lt, Type::Array(_, _)) {
                         return Err(SemaError::new("cannot apply += to array type (arrays are not assignable)"));
+                    }
+                    if *op == BinOp::AddAssign && is_struct(&lt) {
+                        return Err(SemaError::new("cannot apply += to struct type"));
+                    }
+                    if *op == BinOp::AddAssign && is_struct(&rt) {
+                        return Err(SemaError::new("cannot use struct value as rhs of += expression"));
+                    }
+                    if *op == BinOp::AddAssign && lt == Type::Void {
+                        return Err(SemaError::new("cannot apply += to void lvalue"));
+                    }
+                    if *op == BinOp::AddAssign && rt == Type::Void {
+                        return Err(SemaError::new("cannot use void value as rvalue in += expression"));
+                    }
+                    // pointer arithmetic on void* is illegal
+                    if is_pointer_or_array(&lt) {
+                        if let Type::Ptr(inner) = &lt {
+                            if **inner == Type::Void {
+                                return Err(SemaError::new("pointer arithmetic on void pointer is not allowed"));
+                            }
+                        }
                     }
                 }
                 BinOp::Sub | BinOp::SubAssign => {
                     if !is_pointer_or_array(&lt) && is_pointer_or_array(&rt) {
                         return Err(SemaError::new("invalid operands: cannot subtract pointer from integer"));
                     }
-                    // Compound assign to array is illegal (array is not assignable)
+                    // Compound assign to array/struct is illegal
                     if *op == BinOp::SubAssign && matches!(lt, Type::Array(_, _)) {
                         return Err(SemaError::new("cannot apply -= to array type (arrays are not assignable)"));
+                    }
+                    if *op == BinOp::SubAssign && is_struct(&lt) {
+                        return Err(SemaError::new("cannot apply -= to struct type"));
+                    }
+                    if *op == BinOp::SubAssign && is_struct(&rt) {
+                        return Err(SemaError::new("cannot use struct value as rhs of -= expression"));
+                    }
+                    // pointer arithmetic on void* is illegal
+                    if is_pointer_or_array(&lt) {
+                        if let Type::Ptr(inner) = &lt {
+                            if **inner == Type::Void {
+                                return Err(SemaError::new("pointer arithmetic on void pointer is not allowed"));
+                            }
+                        }
                     }
                 }
                 BinOp::Assign => {
                     // Cannot assign to an array
                     if matches!(lt, Type::Array(_, _)) {
                         return Err(SemaError::new("cannot assign to array type"));
+                    }
+                    if lt == Type::Void {
+                        return Err(SemaError::new("cannot assign to void lvalue"));
+                    }
+                    if rt == Type::Void {
+                        return Err(SemaError::new("cannot use void value in assignment"));
+                    }
+                    // Struct lvalue: rhs must be the same struct type
+                    if is_struct(&lt) {
+                        if lt != rt {
+                            return Err(SemaError::new("incompatible types: cannot assign to struct from different or non-struct type"));
+                        }
                     }
                     if is_pointer_or_array(&lt) && !is_pointer_or_array(&rt) {
                         if !matches!(r.as_ref(), Expr::Num(0) | Expr::Cast(Type::Ptr(_), _)) {
@@ -928,6 +1151,10 @@ fn check_types_expr(
                     }
                 }
                 BinOp::Eq | BinOp::Ne => {
+                    // Structs cannot be compared
+                    if is_struct(&lt) || is_struct(&rt) {
+                        return Err(SemaError::new("invalid operands to comparison: struct type"));
+                    }
                     // Helper: get the "effective pointer inner type" treating Array(T, n) as Ptr(T)
                     fn effective_inner(ty: &Type) -> Option<&Type> {
                         match ty {
@@ -959,12 +1186,14 @@ fn check_types_expr(
                     }
                 }
                 BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                    // Structs cannot be relationally compared
+                    if is_struct(&lt) || is_struct(&rt) {
+                        return Err(SemaError::new("invalid operands to comparison: struct type"));
+                    }
                     // Ordering comparisons: pointer vs pointer must match types; pointer vs integer always illegal
+                    // Unlike equality, void* cannot be relationally compared with non-void*
                     if let (Type::Ptr(l_inner), Type::Ptr(r_inner)) = (&lt, &rt) {
-                        if l_inner != r_inner
-                            && !matches!(l_inner.as_ref(), Type::Void)
-                            && !matches!(r_inner.as_ref(), Type::Void)
-                        {
+                        if l_inner != r_inner {
                             return Err(SemaError::new("comparison of pointers to different types"));
                         }
                     }
@@ -1019,13 +1248,23 @@ fn check_types_expr(
             }
             for a in args { check_types_expr(a, vars, func_sigs, func_params, struct_defs)?; }
         }
-        Expr::PostInc(e) | Expr::PostDec(e) | Expr::Cast(_, e) | Expr::Member(e, _) => {
-            // PostInc/PostDec on array is illegal
+        Expr::PostInc(e) | Expr::PostDec(e) | Expr::Member(e, _) => {
+            // PostInc/PostDec on array/struct is illegal
             if matches!(expr, Expr::PostInc(_) | Expr::PostDec(_)) {
                 let et = type_of_expr(e, vars, func_sigs, struct_defs);
                 if matches!(et, Type::Array(_, _)) {
                     return Err(SemaError::new("cannot apply ++ or -- to array type"));
                 }
+                if is_struct(&et) {
+                    return Err(SemaError::new("cannot apply ++ or -- to struct type"));
+                }
+            }
+            check_types_expr(e, vars, func_sigs, func_params, struct_defs)?;
+        }
+        Expr::Cast(cast_ty, e) => {
+            let src_ty = type_of_expr(e, vars, func_sigs, struct_defs);
+            if src_ty == Type::Void && *cast_ty != Type::Void {
+                return Err(SemaError::new("cannot cast void expression to another type"));
             }
             check_types_expr(e, vars, func_sigs, func_params, struct_defs)?;
         }
@@ -1038,10 +1277,36 @@ fn check_types_expr(
             if is_pointer_or_array(&at) && is_pointer_or_array(&bt) {
                 return Err(SemaError::new("subscript with two pointers"));
             }
+            // Void index is illegal
+            if !is_pointer_or_array(&bt) && bt == Type::Void {
+                return Err(SemaError::new("subscript index cannot have void type"));
+            }
+            if !is_pointer_or_array(&at) && at == Type::Void {
+                return Err(SemaError::new("subscript index cannot have void type"));
+            }
+            // Subscripting a pointer to incomplete type (void*) is illegal
+            let elem_ty = match &at {
+                Type::Ptr(inner) | Type::Array(inner, _) => Some(inner.as_ref()),
+                _ => match &bt {
+                    Type::Ptr(inner) | Type::Array(inner, _) => Some(inner.as_ref()),
+                    _ => None,
+                },
+            };
+            if let Some(Type::Void) = elem_ty {
+                return Err(SemaError::new("subscript of pointer to incomplete type (void)"));
+            }
             check_types_expr(a, vars, func_sigs, func_params, struct_defs)?;
             check_types_expr(b, vars, func_sigs, func_params, struct_defs)?;
         }
         Expr::Ternary(c, t, e) => {
+            let ct = type_of_expr(c, vars, func_sigs, struct_defs);
+            if ct == Type::Void { return Err(SemaError::new("void type as ternary condition")); }
+            if is_struct(&ct) { return Err(SemaError::new("struct type as ternary condition")); }
+            let tt = type_of_expr(t, vars, func_sigs, struct_defs);
+            let et = type_of_expr(e, vars, func_sigs, struct_defs);
+            if (tt == Type::Void) != (et == Type::Void) {
+                return Err(SemaError::new("mismatched types in conditional expression: one branch is void, the other is not"));
+            }
             check_types_expr(c, vars, func_sigs, func_params, struct_defs)?;
             check_types_expr(t, vars, func_sigs, func_params, struct_defs)?;
             check_types_expr(e, vars, func_sigs, func_params, struct_defs)?;
@@ -1049,8 +1314,90 @@ fn check_types_expr(
         Expr::InitList(items) => {
             for item in items { check_types_expr(item, vars, func_sigs, func_params, struct_defs)?; }
         }
-        Expr::SizeofExpr(e) => check_types_expr(e, vars, func_sigs, func_params, struct_defs)?,
-        Expr::Num(_) | Expr::StringLit(_) | Expr::Ident(_) | Expr::Sizeof(_) => {}
+        Expr::SizeofExpr(e) => {
+            check_types_expr(e, vars, func_sigs, func_params, struct_defs)?;
+            let et = type_of_expr(e, vars, func_sigs, struct_defs);
+            if et == Type::Void {
+                return Err(SemaError::new("sizeof applied to expression with incomplete type (void)"));
+            }
+            if let Expr::Ident(name) = e.as_ref() {
+                if func_sigs.contains_key(name) {
+                    return Err(SemaError::new("sizeof applied to function type"));
+                }
+            }
+        }
+        Expr::Sizeof(ty) => {
+            if *ty == Type::Void {
+                return Err(SemaError::new("sizeof applied to incomplete type (void)"));
+            }
+        }
+        Expr::Num(_) | Expr::StringLit(_) | Expr::Ident(_) => {}
+    }
+    Ok(())
+}
+
+/// Validates a single array element initializer against the element type.
+/// Checks string literal length and wrong-type-for-string errors.
+fn check_array_element_init(elem_ty: &Type, item: &Expr) -> Result<(), SemaError> {
+    if let Expr::StringLit(s) = item {
+        // s includes a null terminator byte appended by the lexer, so content length = s.len() - 1
+        let content_len = s.len().saturating_sub(1);
+        match elem_ty {
+            Type::Array(inner_ty, n) if is_char_type(inner_ty) => {
+                if *n > 0 && content_len > *n {
+                    return Err(SemaError::new(format!(
+                        "string initializer too long ({} chars) for char array of size {}", content_len, n
+                    )));
+                }
+            }
+            Type::Array(_, _) => {
+                return Err(SemaError::new("string literal can only initialize a char array, not an array of other types"));
+            }
+            // char* element: string literal is a valid initializer (decays to char*)
+            Type::Ptr(inner) if matches!(inner.as_ref(), Type::Char) => {}
+            _ => {
+                return Err(SemaError::new("string literal can only initialize a char array or char pointer"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Checks that the struct initializer (a list of items for a struct of `struct_name`)
+/// doesn't have more elements
+/// than the struct has members, and recursively validates nested struct sub-initializers.
+fn check_struct_init_count(
+    struct_name: &str,
+    items: &[Expr],
+    struct_defs: &HashMap<String, Vec<(String, Type)>>,
+) -> Result<(), SemaError> {
+    let members = match struct_defs.get(struct_name) {
+        Some(m) => m,
+        None => return Ok(()), // unknown struct — let other checks handle it
+    };
+    if items.len() > members.len() {
+        return Err(SemaError::new(format!(
+            "too many initializers for struct '{}' (expected at most {}, got {})",
+            struct_name, members.len(), items.len()
+        )));
+    }
+    // Recursively check nested struct/array members
+    for (item, (_, member_ty)) in items.iter().zip(members.iter()) {
+        if let Expr::InitList(sub_items) = item {
+            match member_ty {
+                Type::Struct(inner_name) => {
+                    check_struct_init_count(inner_name, sub_items, struct_defs)?;
+                }
+                Type::Array(_, n) => {
+                    if *n > 0 && sub_items.len() > *n {
+                        return Err(SemaError::new(format!(
+                            "too many initializers for array member (expected at most {}, got {})", n, sub_items.len()
+                        )));
+                    }
+                }
+                _ => {}
+            }
+        }
     }
     Ok(())
 }
@@ -1068,9 +1415,14 @@ fn check_types_stmt(
             if *ty == Type::Void {
                 return Err(SemaError::new("variable cannot have void type"));
             }
+            if let Type::Array(elem_ty, _) = ty {
+                if **elem_ty == Type::Void {
+                    return Err(SemaError::new("array element type cannot be void (incomplete type)"));
+                }
+            }
             if let Some(e) = init {
                 // Array initializer checks
-                if let Type::Array(_, n) = ty {
+                if let Type::Array(elem_ty, n) = ty {
                     match e {
                         Expr::InitList(items) => {
                             if *n > 0 && items.len() > *n {
@@ -1078,9 +1430,29 @@ fn check_types_stmt(
                                     "too many initializers for array (expected at most {}, got {})", n, items.len()
                                 )));
                             }
+                            // Check each item against the element type
+                            for item in items.iter() {
+                                check_array_element_init(elem_ty, item)?;
+                            }
                         }
-                        Expr::StringLit(_) => {} // string literal initializes char array — OK
+                        Expr::StringLit(s) => {
+                            // String literal initializes a char array: check it's a char type and fits
+                            if !is_char_type(elem_ty) {
+                                return Err(SemaError::new("string literal can only initialize a char array"));
+                            }
+                            let content_len = s.len().saturating_sub(1); // s includes null terminator
+                            if *n > 0 && content_len > *n {
+                                return Err(SemaError::new(format!(
+                                    "string initializer too long ({} chars) for array of size {}", content_len, n
+                                )));
+                            }
+                        }
                         _ => return Err(SemaError::new("array must be initialized with a compound initializer")),
+                    }
+                } else if let Type::Struct(struct_name) = ty {
+                    // Struct initializer: recursively check element counts
+                    if let Expr::InitList(items) = e {
+                        check_struct_init_count(struct_name, items, struct_defs)?;
                     }
                 } else if let Expr::InitList(items) = e {
                     // Scalar initialized with multi-item compound initializer
@@ -1096,6 +1468,23 @@ fn check_types_stmt(
                                 return Err(SemaError::new("incompatible types: initializing pointer with integer"));
                             }
                         }
+                        // Reject implicit conversion between char* and signed/unsigned char*
+                        // String literals have type char*, so they can't initialize signed char* or unsigned char*
+                        if let Expr::StringLit(_) = e {
+                            if matches!(ty, Type::Ptr(inner) if !matches!(inner.as_ref(), Type::Char)) {
+                                return Err(SemaError::new("cannot initialize pointer with string literal: incompatible pointer types (string literals have type char *)"));
+                            }
+                        } else {
+                            // Reject implicit conversion between different char pointer types
+                            let src = type_of_expr(e, vars, func_sigs, struct_defs);
+                            if let (Type::Ptr(dst_inner), Some(Type::Ptr(src_inner))) = (ty, Some(src)) {
+                                let dst_is_char = matches!(dst_inner.as_ref(), Type::Char | Type::SignedChar | Type::UnsignedChar);
+                                let src_is_char = matches!(src_inner.as_ref(), Type::Char | Type::SignedChar | Type::UnsignedChar);
+                                if dst_is_char && src_is_char && dst_inner.as_ref() != src_inner.as_ref() {
+                                    return Err(SemaError::new("incompatible pointer types: implicit conversion between char pointer types"));
+                                }
+                            }
+                        }
                     }
                 }
                 check_types_expr(e, vars, func_sigs, func_params, struct_defs)?;
@@ -1105,9 +1494,20 @@ fn check_types_stmt(
             if *ret_ty == Type::Void {
                 return Err(SemaError::new("returning a value from a void function"));
             }
+            let et = type_of_expr(e, vars, func_sigs, struct_defs);
+            if et == Type::Void {
+                return Err(SemaError::new("cannot return void expression from non-void function"));
+            }
+            if is_pointer_or_array(&et) && !is_pointer_or_array(ret_ty) && !is_struct(ret_ty) {
+                return Err(SemaError::new("cannot implicitly convert pointer to integer in return statement"));
+            }
             check_types_expr(e, vars, func_sigs, func_params, struct_defs)?;
         }
-        Stmt::Return(None) => {}
+        Stmt::Return(None) => {
+            if *ret_ty != Type::Void {
+                return Err(SemaError::new("return with no value in non-void function"));
+            }
+        }
         Stmt::Expr(e) => check_types_expr(e, vars, func_sigs, func_params, struct_defs)?,
         Stmt::If(cond, then, els) => {
             let ct = type_of_expr(cond, vars, func_sigs, struct_defs);
@@ -1158,6 +1558,7 @@ fn check_types_stmt(
             for s in stmts { check_types_stmt(s, vars, func_sigs, func_params, struct_defs, ret_ty)?; }
         }
         Stmt::Label(_, inner) => check_types_stmt(inner, vars, func_sigs, func_params, struct_defs, ret_ty)?,
+        Stmt::Source(_, inner) => check_types_stmt(inner, vars, func_sigs, func_params, struct_defs, ret_ty)?,
         Stmt::Break | Stmt::Continue | Stmt::Goto(_) => {}
     }
     Ok(())
@@ -1210,7 +1611,7 @@ fn analyze_func(
     // Collect locals from body
     let mut local_idx = 0usize;
     let mut static_locals: Vec<(String, Type, Option<GlobalInit>)> = Vec::new();
-    collect_locals(&f.body, &mut vars, &mut local_idx, struct_defs, &f.name, &mut static_locals)?;
+    collect_locals(&f.body, &mut vars, &mut local_idx, struct_defs, &f.name, &mut static_locals, globals)?;
 
     // Merge globals (lower priority)
     for (name, info) in globals {
@@ -1237,9 +1638,10 @@ fn collect_locals(
     struct_defs: &HashMap<String, Vec<(String, Type)>>,
     func_name: &str,
     static_locals: &mut Vec<(String, Type, Option<GlobalInit>)>,
+    globals: &HashMap<String, VarInfo>,
 ) -> Result<(), SemaError> {
     for stmt in stmts {
-        collect_locals_stmt(stmt, vars, next_idx, struct_defs, func_name, static_locals)?;
+        collect_locals_stmt(stmt, vars, next_idx, struct_defs, func_name, static_locals, globals)?;
     }
     Ok(())
 }
@@ -1251,6 +1653,7 @@ fn collect_locals_stmt(
     struct_defs: &HashMap<String, Vec<(String, Type)>>,
     func_name: &str,
     static_locals: &mut Vec<(String, Type, Option<GlobalInit>)>,
+    globals: &HashMap<String, VarInfo>,
 ) -> Result<(), SemaError> {
     match stmt {
         Stmt::Decl(ty, name, init_expr, sc) => {
@@ -1273,6 +1676,12 @@ fn collect_locals_stmt(
                     } else {
                         name.clone()
                     };
+                    // Check that the declared type matches the global's type
+                    if let Some(global_info) = globals.get(&base) {
+                        if global_info.ty != *ty {
+                            return Err(SemaError::new(format!("conflicting types for variable '{}'", base)));
+                        }
+                    }
                     let sym = format!("__g_{}", base);
                     vars.insert(name.clone(), VarInfo { ty: ty.clone(), storage: VarStorage::Global(sym) });
                     // No stack slot allocated.
@@ -1292,24 +1701,25 @@ fn collect_locals_stmt(
                 }
             }
         }
-        Stmt::Block(stmts) => collect_locals(stmts, vars, next_idx, struct_defs, func_name, static_locals)?,
+        Stmt::Block(stmts) => collect_locals(stmts, vars, next_idx, struct_defs, func_name, static_locals, globals)?,
         Stmt::If(_, then, els) => {
-            collect_locals_stmt(then, vars, next_idx, struct_defs, func_name, static_locals)?;
-            if let Some(e) = els { collect_locals_stmt(e, vars, next_idx, struct_defs, func_name, static_locals)?; }
+            collect_locals_stmt(then, vars, next_idx, struct_defs, func_name, static_locals, globals)?;
+            if let Some(e) = els { collect_locals_stmt(e, vars, next_idx, struct_defs, func_name, static_locals, globals)?; }
         }
-        Stmt::While(_, body) => collect_locals_stmt(body, vars, next_idx, struct_defs, func_name, static_locals)?,
-        Stmt::DoWhile(body, _) => collect_locals_stmt(body, vars, next_idx, struct_defs, func_name, static_locals)?,
+        Stmt::While(_, body) => collect_locals_stmt(body, vars, next_idx, struct_defs, func_name, static_locals, globals)?,
+        Stmt::DoWhile(body, _) => collect_locals_stmt(body, vars, next_idx, struct_defs, func_name, static_locals, globals)?,
         Stmt::For { init, body, .. } => {
-            if let Some(s) = init { collect_locals_stmt(s, vars, next_idx, struct_defs, func_name, static_locals)?; }
-            collect_locals_stmt(body, vars, next_idx, struct_defs, func_name, static_locals)?;
+            if let Some(s) = init { collect_locals_stmt(s, vars, next_idx, struct_defs, func_name, static_locals, globals)?; }
+            collect_locals_stmt(body, vars, next_idx, struct_defs, func_name, static_locals, globals)?;
         }
         Stmt::Switch { arms, .. } => {
             for arm in arms {
-                collect_locals(arm.stmts.as_slice(), vars, next_idx, struct_defs, func_name, static_locals)?;
+                collect_locals(arm.stmts.as_slice(), vars, next_idx, struct_defs, func_name, static_locals, globals)?;
             }
         }
         Stmt::Return(_) | Stmt::Expr(_) | Stmt::Break | Stmt::Continue | Stmt::Goto(_) => {}
-        Stmt::Label(_, stmt) => collect_locals_stmt(stmt, vars, next_idx, struct_defs, func_name, static_locals)?,
+        Stmt::Label(_, stmt) => collect_locals_stmt(stmt, vars, next_idx, struct_defs, func_name, static_locals, globals)?,
+        Stmt::Source(_, inner) => collect_locals_stmt(inner, vars, next_idx, struct_defs, func_name, static_locals, globals)?,
     }
     Ok(())
 }
@@ -1440,6 +1850,7 @@ fn collect_strings_stmt(
             }
         }
         Stmt::Break | Stmt::Continue => {}
+        Stmt::Source(_, inner) => collect_strings_stmt(inner, map, lits, counter),
         _ => {}
     }
 }
@@ -1526,6 +1937,9 @@ fn alpha_rename_stmt(
         Stmt::Goto(_) => {}
         Stmt::Label(_, stmt) => {
             alpha_rename_stmt(stmt, counters, scopes);
+        }
+        Stmt::Source(_, inner) => {
+            alpha_rename_stmt(inner, counters, scopes);
         }
         Stmt::Switch { expr, arms } => {
             alpha_rename_expr(expr, scopes);

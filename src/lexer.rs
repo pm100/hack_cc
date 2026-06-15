@@ -156,7 +156,31 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut pos = 0;
     let mut tokens = Vec::new();
 
-    // Precompute line-start byte offsets for O(log n) pos â†’ (line, col).
+    // Pre-scan for `#line N "file"` directives emitted by the preprocessor.
+    // Build a physical-line -> logical-line mapping so every token carries the
+    // correct source line from the original file.
+    let mut physical_to_logical: Vec<u32> = Vec::new();
+    {
+        let mut cur_logical: u32 = 1;
+        for line in source.lines() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("#line ") {
+                let rest = rest.trim();
+                let n_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+                if let Ok(n) = rest[..n_end].parse::<u32>() {
+                    cur_logical = n;
+                }
+                // The directive line itself: push a placeholder (no tokens come from it)
+                physical_to_logical.push(cur_logical);
+                // Don't advance cur_logical -- next content line IS cur_logical
+            } else {
+                physical_to_logical.push(cur_logical);
+                cur_logical += 1;
+            }
+        }
+    }
+
+    // Precompute line-start byte offsets for O(log n) pos -> (physical line, col).
     let line_starts: Vec<usize> = std::iter::once(0)
         .chain(bytes.iter().enumerate().filter_map(
             |(i, &b)| {
@@ -166,15 +190,22 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         .collect();
 
     let pos_to_lc = |p: usize| -> (u32, u32) {
-        let line = line_starts.partition_point(|&s| s <= p) as u32;
-        let col = (p - line_starts[(line - 1) as usize] + 1) as u32;
-        (line, col)
+        let phys = line_starts.partition_point(|&s| s <= p);
+        let logical = physical_to_logical.get(phys.saturating_sub(1)).copied().unwrap_or(phys as u32);
+        let col = (p - line_starts[phys.saturating_sub(1)]) as u32 + 1;
+        (logical, col)
     };
-
     while pos < bytes.len() {
         // Skip whitespace
         if bytes[pos].is_ascii_whitespace() {
             pos += 1;
+            continue;
+        }
+        // `#line` directives: skip entire line (already handled in pre-scan)
+        if bytes[pos] == b'#' {
+            while pos < bytes.len() && bytes[pos] != b'\n' {
+                pos += 1;
+            }
             continue;
         }
         // Line comments
@@ -322,6 +353,9 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 loop {
                     if pos >= bytes.len() {
                         return Err(LexError::new(sl, sc, "unterminated string literal"));
+                    }
+                    if bytes[pos] == b'\n' || bytes[pos] == b'\r' {
+                        return Err(LexError::new(sl, sc, "newline in string literal"));
                     }
                     if bytes[pos] == b'"' {
                         pos += 1;
@@ -585,6 +619,7 @@ fn lex_char_escape(bytes: &[u8], pos: &mut usize) -> Result<i16, String> {
         b'b' => 8,
         b'f' => 12,
         b'v' => 11,
+        b'?' => 63,  // \? is a valid escape for '?'
         c => return Err(format!("unknown escape sequence '\\{}'", c as char)),
     })
 }

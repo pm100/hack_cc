@@ -170,6 +170,8 @@ struct Gen {
     func_return_types: HashMap<String, Type>,
     current_ret_ty: Type,
     need_return_long_trampoline: bool,
+    /// If set, emit `.dbg file:line` directives for source-level debugging
+    source_file: Option<String>,
 }
 
 impl Gen {
@@ -191,6 +193,7 @@ impl Gen {
             func_return_types,
             current_ret_ty: Type::Int,
             need_return_long_trampoline: false,
+            source_file: None,
         }
     }
 
@@ -1058,7 +1061,7 @@ impl Gen {
                     self.emit("A=M");       // A = address
                     self.emit("M=M+1");     // increment in place
                     // Wrap for char types
-                    if matches!(inner_ty, Some(Type::Char)) {
+                    if matches!(inner_ty, Some(Type::Char) | Some(Type::SignedChar)) {
                         self.emit("D=M");
                         self.truncate_d_to_signed_char();
                         self.emit("@R13");
@@ -1106,7 +1109,7 @@ impl Gen {
                     self.emit("A=M");       // A = address
                     self.emit("M=M-1");     // decrement in place
                     // Wrap for char types
-                    if matches!(inner_ty, Some(Type::Char)) {
+                    if matches!(inner_ty, Some(Type::Char) | Some(Type::SignedChar)) {
                         self.emit("D=M");
                         self.truncate_d_to_signed_char();
                         self.emit("@R13");
@@ -1132,7 +1135,7 @@ impl Gen {
                             self.sign_extend_to_long();
                         }
                     }
-                    Type::Char => {
+                    Type::Char | Type::SignedChar => {
                         self.gen_expr(inner, vars)?;
                         if matches!(inner_ty, Type::Long) {
                             // Take lo word, discard hi
@@ -1440,7 +1443,7 @@ impl Gen {
         }
 
         // Truncate for char types.
-        if matches!(lhs_ty, Some(Type::Char)) {
+        if matches!(lhs_ty, Some(Type::Char) | Some(Type::SignedChar)) {
             self.emit("@R13"); self.emit("D=M");
             self.truncate_d_to_signed_char();
             self.emit("@R13"); self.emit("M=D");
@@ -2186,7 +2189,7 @@ impl Gen {
             Expr::Ident(name) => {
                 // Ident address computation never calls gen_expr, so R13 is safe.
                 self.pop_d();
-                if matches!(lhs_ty, Some(Type::Char)) {
+                if matches!(lhs_ty, Some(Type::Char) | Some(Type::SignedChar)) {
                     self.truncate_d_to_signed_char();
                 } else if matches!(lhs_ty, Some(Type::UnsignedChar)) {
                     self.truncate_d_to_unsigned_char();
@@ -2208,7 +2211,7 @@ impl Gen {
                 self.emit("@R14");
                 self.emit("M=D");          // R14 = lhs_address
                 self.pop_d();              // D = rhs_value
-                if matches!(lhs_ty, Some(Type::Char)) {
+                if matches!(lhs_ty, Some(Type::Char) | Some(Type::SignedChar)) {
                     self.truncate_d_to_signed_char();
                 } else if matches!(lhs_ty, Some(Type::UnsignedChar)) {
                     self.truncate_d_to_unsigned_char();
@@ -2320,6 +2323,100 @@ impl Gen {
         Ok(())
     }
 
+    // ── Array initializer helpers ────────────────────────────────────────
+
+    /// Store the value in D to `storage[offset]` (flat word offset from variable base).
+    fn store_d_at_var_offset(&mut self, storage: &VarStorage, offset: usize) {
+        match storage {
+            VarStorage::Local(base) => {
+                let idx = base + offset;
+                self.emit("@R13"); self.emit("M=D");
+                self.emit("@LCL"); self.emit("D=M");
+                if idx > 0 { self.emit(&format!("@{}", idx)); self.emit("D=D+A"); }
+                self.emit("@R14"); self.emit("M=D");
+                self.emit("@R13"); self.emit("D=M");
+                self.emit("@R14"); self.emit("A=M"); self.emit("M=D");
+            }
+            VarStorage::Global(sym) => {
+                let sym_name = if offset == 0 { sym.clone() } else { format!("{}_{}", sym, offset) };
+                self.emit(&format!("@{}", sym_name));
+                self.emit("M=D");
+            }
+            VarStorage::Param(base) => {
+                let idx = base + offset;
+                self.emit("@R13"); self.emit("M=D");
+                self.emit("@ARG"); self.emit("D=M");
+                if idx > 0 { self.emit(&format!("@{}", idx)); self.emit("D=D+A"); }
+                self.emit("@R14"); self.emit("M=D");
+                self.emit("@R13"); self.emit("D=M");
+                self.emit("@R14"); self.emit("A=M"); self.emit("M=D");
+            }
+        }
+    }
+
+    /// Recursively emit initialization code for array/struct variables.
+    /// `elem_ty`: type of each element in `items` at the current recursion level.
+    /// `base_offset`: flat word offset from the variable's start address.
+    fn gen_array_init(
+        &mut self,
+        elem_ty: &Type,
+        items: &[Expr],
+        base_offset: usize,
+        storage: &VarStorage,
+        vars: &HashMap<String, VarInfo>,
+    ) -> Result<(), CodegenError> {
+        // Struct initializer: items are field values; use per-field offsets, not struct stride.
+        if let Type::Struct(struct_name) = elem_ty {
+            let fields = self.struct_defs.get(struct_name).cloned().unwrap_or_default();
+            let mut field_offset = base_offset;
+            for (item, (_, field_ty)) in items.iter().zip(fields.iter()) {
+                let field_size = self.type_size(field_ty).max(1);
+                if let Expr::InitList(sub_items) = item {
+                    self.gen_array_init(field_ty, sub_items, field_offset, storage, vars)?;
+                } else {
+                    self.gen_expr(item, vars)?;
+                    self.pop_d();
+                    self.store_d_at_var_offset(storage, field_offset);
+                }
+                field_offset += field_size;
+            }
+            return Ok(());
+        }
+
+        let inner_size = self.type_size(elem_ty).max(1);
+        for (i, item) in items.iter().enumerate() {
+            let item_offset = base_offset + i * inner_size;
+            match (elem_ty, item) {
+                // Nested array with sub-initializer: recurse
+                (Type::Array(sub_elem_ty, _), Expr::InitList(sub_items)) => {
+                    let sub_ty = sub_elem_ty.as_ref().clone();
+                    self.gen_array_init(&sub_ty, sub_items, item_offset, storage, vars)?;
+                }
+                // Char array row initialized with string literal (char, signed char, or unsigned char)
+                (Type::Array(char_ty, row_len), Expr::StringLit(s))
+                    if matches!(char_ty.as_ref(), Type::Char | Type::SignedChar | Type::UnsignedChar) =>
+                {
+                    let bytes: Vec<i16> = s.bytes().map(|b| b as i16)
+                        .chain(std::iter::once(0i16)).collect();
+                    let row_len = *row_len;
+                    for j in 0..row_len {
+                        let ch = bytes.get(j).copied().unwrap_or(0);
+                        if ch == 0 { self.emit("D=0"); }
+                        else { self.emit(&format!("@{}", ch)); self.emit("D=A"); }
+                        self.store_d_at_var_offset(storage, item_offset + j);
+                    }
+                }
+                // Scalar (or any other expression)
+                _ => {
+                    self.gen_expr(item, vars)?;
+                    self.pop_d();
+                    self.store_d_at_var_offset(storage, item_offset);
+                }
+            }
+        }
+        Ok(())
+    }
+
     // ── Statement codegen ────────────────────────────────────────────────
 
     fn gen_stmt(
@@ -2353,9 +2450,9 @@ impl Gen {
                         CodegenError::new(format!("undefined local '{}'", name))
                     })?.clone();
                     // Special case: char arr[N] = "string literal" — copy bytes into slots.
-                    if let (Expr::StringLit(s), Type::Array(_, arr_len)) = (init_expr, &info.ty.clone()) {
+                    if let (Expr::StringLit(s), Type::Array(_, arr_len)) = (init_expr, info.ty.clone()) {
                         let bytes: Vec<i16> = s.bytes().map(|b| b as i16).chain(std::iter::once(0)).collect();
-                        let n = (*arr_len).min(bytes.len());
+                        let n = arr_len.min(bytes.len());
                         for i in 0..n {
                             let ch = bytes[i];
                             if ch == 0 {
@@ -2411,142 +2508,12 @@ impl Gen {
                             }
                         }
                     } else if let Expr::InitList(items) = init_expr {
-                        // Determine the stride: size of each element in the outer array.
-                        let (stride, inner_char_row_len) = match &info.ty {
-                            Type::Array(inner_ty, _) => {
-                                let sz = self.type_size(inner_ty);
-                                // If inner type is char[N], remember N for string-literal init.
-                                let row_len = if let Type::Array(base_ty, n) = inner_ty.as_ref() {
-                                    if matches!(base_ty.as_ref(), Type::Char) { Some(*n) } else { None }
-                                } else { None };
-                                (sz.max(1), row_len)
-                            }
-                            _ => (1, None),
+                        let elem_ty = match &info.ty {
+                            Type::Array(inner, _) => inner.as_ref().clone(),
+                            ty => ty.clone(),
                         };
-
-                        for (i, item) in items.iter().enumerate() {
-                            let base_offset = i * stride;
-
-                            // Special case: char arr[M][N] = {"str0", "str1", ...}
-                            // Copy string bytes directly into the row slots.
-                            if let (Some(row_len), Expr::StringLit(s)) = (inner_char_row_len, item) {
-                                let bytes: Vec<i16> = s.bytes().map(|b| b as i16)
-                                    .chain(std::iter::once(0)).collect();
-                                for j in 0..row_len {
-                                    let ch = bytes.get(j).copied().unwrap_or(0);
-                                    if ch == 0 {
-                                        self.emit("D=0");
-                                    } else {
-                                        self.emit(&format!("@{}", ch));
-                                        self.emit("D=A");
-                                    }
-                                    self.emit("@R13");
-                                    self.emit("M=D");
-                                    match &info.storage {
-                                        VarStorage::Local(base) => {
-                                            let idx = base + base_offset + j;
-                                            self.emit("@LCL");
-                                            self.emit("D=M");
-                                            if idx > 0 {
-                                                self.emit(&format!("@{}", idx));
-                                                self.emit("D=D+A");
-                                            }
-                                            self.emit("@R14");
-                                            self.emit("M=D");
-                                            self.emit("@R13");
-                                            self.emit("D=M");
-                                            self.emit("@R14");
-                                            self.emit("A=M");
-                                            self.emit("M=D");
-                                        }
-                                        VarStorage::Global(sym) => {
-                                            let flat_idx = base_offset + j;
-                                            let elem_sym = if flat_idx == 0 {
-                                                sym.clone()
-                                            } else {
-                                                format!("{}_{}", sym, flat_idx)
-                                            };
-                                            self.emit(&format!("@{}", elem_sym));
-                                            self.emit("M=D");
-                                        }
-                                        VarStorage::Param(base) => {
-                                            let idx = base + base_offset + j;
-                                            self.emit("@ARG");
-                                            self.emit("D=M");
-                                            if idx > 0 {
-                                                self.emit(&format!("@{}", idx));
-                                                self.emit("D=D+A");
-                                            }
-                                            self.emit("@R14");
-                                            self.emit("M=D");
-                                            self.emit("@R13");
-                                            self.emit("D=M");
-                                            self.emit("@R14");
-                                            self.emit("A=M");
-                                            self.emit("M=D");
-                                        }
-                                    }
-                                }
-                                continue;
-                            }
-
-                            // Standard case: single-element value at base + base_offset.
-                            self.gen_expr(item, vars)?;
-                            self.pop_d();
-                            self.emit("@R13");
-                            self.emit("M=D");
-                            match &info.storage {
-                                VarStorage::Local(base) => {
-                                    let idx = base + base_offset;
-                                    self.emit("@LCL");
-                                    self.emit("D=M");
-                                    if idx > 0 {
-                                        self.emit(&format!("@{}", idx));
-                                        self.emit("D=D+A");
-                                    }
-                                    self.emit("@R14");
-                                    self.emit("M=D");
-                                    self.emit("@R13");
-                                    self.emit("D=M");
-                                    self.emit("@R14");
-                                    self.emit("A=M");
-                                    self.emit("M=D");
-                                }
-                                VarStorage::Global(sym) => {
-                                    let flat_idx = base_offset;
-                                    let elem_sym = if flat_idx == 0 {
-                                        sym.clone()
-                                    } else {
-                                        format!("{}_{}", sym, flat_idx)
-                                    };
-                                    self.emit(&format!("@{}", elem_sym));
-                                    self.emit("D=A");
-                                    self.emit("@R14");
-                                    self.emit("M=D");
-                                    self.emit("@R13");
-                                    self.emit("D=M");
-                                    self.emit("@R14");
-                                    self.emit("A=M");
-                                    self.emit("M=D");
-                                }
-                                VarStorage::Param(base) => {
-                                    let idx = base + base_offset;
-                                    self.emit("@ARG");
-                                    self.emit("D=M");
-                                    if idx > 0 {
-                                        self.emit(&format!("@{}", idx));
-                                        self.emit("D=D+A");
-                                    }
-                                    self.emit("@R14");
-                                    self.emit("M=D");
-                                    self.emit("@R13");
-                                    self.emit("D=M");
-                                    self.emit("@R14");
-                                    self.emit("A=M");
-                                    self.emit("M=D");
-                                }
-                            }
-                        }
+                        let storage = info.storage.clone();
+                        self.gen_array_init(&elem_ty, items, 0, &storage, vars)?;
                     } else {
                         let decl_ty = vars.get(name).map(|v| v.ty.clone()).unwrap_or(Type::Int);
                         self.gen_expr(init_expr, vars)?;
@@ -2764,17 +2731,40 @@ impl Gen {
                 self.emit(&format!("(__lbl_{}_{})", func_name, lbl));
                 self.gen_stmt(stmt, vars, func_name)?;
             }
+            Stmt::Source(line, inner) => {
+                if let Some(ref file) = self.source_file.clone() {
+                    self.emit(&format!(".dbg {}:{}", file, line));
+                }
+                self.gen_stmt(inner, vars, func_name)?;
+            }
         }
         Ok(())
     }
 
     // ── Function codegen ─────────────────────────────────────────────────
 
+    /// Return the line number of the first `Stmt::Source` wrapper in a statement list.
+    fn first_source_line(stmts: &[crate::parser::Stmt]) -> Option<u32> {
+        use crate::parser::Stmt;
+        stmts.iter().find_map(|s| {
+            if let Stmt::Source(line, _) = s { Some(*line) } else { None }
+        })
+    }
+
     fn gen_func(&mut self, f: &AnnotatedFunc) -> Result<(), CodegenError> {
         let n_locals = f.n_locals;
         self.current_ret_ty = f.ret_ty.clone();
         self.emit(&format!("// function {} ({} locals)", f.name, n_locals));
         self.emit(&format!("({})", f.name));
+
+        // Emit a .dbg annotation at the function entry point so that the prolog
+        // (local-init code) is attributed to the function's first source line rather
+        // than falling back to whatever preceded this function in the source map.
+        if let Some(ref file) = self.source_file.clone() {
+            if let Some(first_line) = Self::first_source_line(&f.body) {
+                self.emit(&format!(".dbg {}:{}", file, first_line));
+            }
+        }
 
         // Initialize locals to 0
         for _ in 0..n_locals {
@@ -2944,6 +2934,7 @@ fn collect_calls_stmt(s: &Stmt, calls: &mut HashSet<String>) {
         Stmt::Break | Stmt::Continue => {}
         Stmt::Goto(_) => {}
         Stmt::Label(_, stmt) => collect_calls_stmt(stmt, calls),
+        Stmt::Source(_, inner) => collect_calls_stmt(inner, calls),
         _ => {}
     }
 }
@@ -3002,13 +2993,23 @@ fn emit_init_value(g: &mut Gen, val: i16, sym: &str) {
 
 /// Compile all functions including the bootstrap (full program, ready to link and emit).
 pub fn generate(sema: SemaResult) -> Result<CompiledProgram, CodegenError> {
-    generate_inner(sema, false)
+    generate_inner(sema, false, None)
+}
+
+/// Like `generate` but emits `.dbg file:line` directives for source-level debugging.
+pub fn generate_with_debug(sema: SemaResult, source_file: String) -> Result<CompiledProgram, CodegenError> {
+    generate_inner(sema, false, Some(source_file))
 }
 
 /// Compile function bodies only — no bootstrap, no entry-point call to main.
 /// Used when producing `.hobj` object files for later linking by `hack_ld`.
 pub fn generate_body_only(sema: SemaResult) -> Result<CompiledProgram, CodegenError> {
-    generate_inner(sema, true)
+    generate_inner(sema, true, None)
+}
+
+/// Like `generate_body_only` but emits `.dbg file:line` directives.
+pub fn generate_body_only_with_debug(sema: SemaResult, source_file: String) -> Result<CompiledProgram, CodegenError> {
+    generate_inner(sema, true, Some(source_file))
 }
 
 /// Return the Hack assembly bootstrap that initialises the stack pointer,
@@ -3074,7 +3075,7 @@ pub fn gen_bootstrap(init_code: &str, sp_base: u16) -> String {
     lines.join("\n")
 }
 
-fn generate_inner(sema: SemaResult, body_only: bool) -> Result<CompiledProgram, CodegenError> {
+fn generate_inner(sema: SemaResult, body_only: bool, source_file: Option<String>) -> Result<CompiledProgram, CodegenError> {
     // ── Phase 1: Build call graph; find reachable user functions from main ──
     let func_names: HashSet<String> = sema.funcs.iter().map(|f| f.name.clone()).collect();
     let mut call_graph: HashMap<String, HashSet<String>> = HashMap::new();
@@ -3107,6 +3108,7 @@ fn generate_inner(sema: SemaResult, body_only: bool) -> Result<CompiledProgram, 
 
     // ── Phase 2: Generate code ───────────────────────────────────────────────
     let mut g = Gen::new(sema.string_map.clone(), sema.struct_defs.clone(), true, sema.func_return_types.clone());
+    g.source_file = source_file;
 
     if !body_only {
         // Compute SP so it starts above all data (string literals + globals) plus a

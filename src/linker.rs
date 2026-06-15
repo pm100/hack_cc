@@ -30,9 +30,9 @@ pub fn default_lib_dirs() -> Vec<PathBuf> {
     vec![]
 }
 
-/// Build a symbol -> file-content index by scanning `.s` files in `lib_dirs`.
-/// Each `.s` file must have a `// PROVIDES: sym1 sym2 ...` comment on its first line.
-fn build_lib_index(lib_dirs: &[PathBuf]) -> HashMap<String, Arc<String>> {
+/// Build a symbol -> (file-content, source-path) index by scanning `.s` files in `lib_dirs`.
+/// Each `.s` file must have a `.provides sym1 sym2 ...` directive on its first line.
+fn build_lib_index(lib_dirs: &[PathBuf]) -> HashMap<String, Arc<(String, String)>> {
     let mut index = HashMap::new();
     for dir in lib_dirs {
         scan_dir(dir, &mut index);
@@ -40,7 +40,7 @@ fn build_lib_index(lib_dirs: &[PathBuf]) -> HashMap<String, Arc<String>> {
     index
 }
 
-fn scan_dir(dir: &Path, index: &mut HashMap<String, Arc<String>>) {
+fn scan_dir(dir: &Path, index: &mut HashMap<String, Arc<(String, String)>>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -52,7 +52,8 @@ fn scan_dir(dir: &Path, index: &mut HashMap<String, Arc<String>>) {
             if let Some(rest) = first_line.strip_prefix(".provides ") {
                 let syms: Vec<String> = rest.split_whitespace().map(|s| s.to_string()).collect();
                 if !syms.is_empty() {
-                    let shared = Arc::new(content);
+                    let source_path = path.to_string_lossy().replace('\\', "/");
+                    let shared = Arc::new((content, source_path));
                     for sym in syms {
                         index.entry(sym).or_insert_with(|| Arc::clone(&shared));
                     }
@@ -62,11 +63,42 @@ fn scan_dir(dir: &Path, index: &mut HashMap<String, Arc<String>>) {
     }
 }
 
+/// Inject `.dbg file:line` directives before each instruction line in a `.s` file.
+/// Used during debug linking so library assembly gets source-location entries.
+fn inject_debug_annotations(content: &str, source_path: &str) -> String {
+    let mut out = String::with_capacity(content.len() * 2);
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = line.trim();
+        // Only annotate actual instruction lines
+        if !trimmed.is_empty()
+            && !trimmed.starts_with("//")
+            && !trimmed.starts_with('(')
+            && !trimmed.starts_with('.')
+        {
+            out.push_str(&format!(".dbg {}:{}\n", source_path, line_no));
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 /// Link `user_asm` with library modules from `lib_dirs`.
 ///
 /// Returns the final combined assembly text with only the required library
 /// modules appended, in dependency order (determined by repeated symbol scanning).
 pub fn link(user_asm: &str, lib_dirs: &[PathBuf]) -> String {
+    link_inner(user_asm, lib_dirs, false)
+}
+
+/// Like [`link`] but injects `.dbg file:line` annotations into each library module
+/// so the final PDB has source-location entries for assembly-level code.
+pub fn link_debug(user_asm: &str, lib_dirs: &[PathBuf]) -> String {
+    link_inner(user_asm, lib_dirs, true)
+}
+
+fn link_inner(user_asm: &str, lib_dirs: &[PathBuf], debug: bool) -> String {
     let index = build_lib_index(lib_dirs);
 
     let mut combined = user_asm.to_string();
@@ -76,7 +108,7 @@ pub fn link(user_asm: &str, lib_dirs: &[PathBuf]) -> String {
     loop {
         let defined = collect_defined(&combined);
         let referenced = collect_referenced(&combined);
-        let mut to_append: Vec<Arc<String>> = Vec::new();
+        let mut to_append: Vec<Arc<(String, String)>> = Vec::new();
 
         // Sort symbols so library modules are appended in a deterministic order.
         let mut sorted_refs: Vec<&String> = referenced.iter().collect();
@@ -85,9 +117,9 @@ pub fn link(user_asm: &str, lib_dirs: &[PathBuf]) -> String {
             if defined.contains(sym) || included.contains(sym) {
                 continue;
             }
-            if let Some(content) = index.get(sym.as_str()) {
+            if let Some(entry) = index.get(sym.as_str()) {
                 included.insert(sym.clone());
-                to_append.push(Arc::clone(content));
+                to_append.push(Arc::clone(entry));
             }
         }
 
@@ -99,9 +131,14 @@ pub fn link(user_asm: &str, lib_dirs: &[PathBuf]) -> String {
             combined.push_str("\n// .library_section\n");
             library_section_emitted = true;
         }
-        for text in to_append {
+        for entry in to_append {
+            let (content, source_path) = entry.as_ref();
             combined.push('\n');
-            combined.push_str(&text);
+            if debug {
+                combined.push_str(&inject_debug_annotations(content, source_path));
+            } else {
+                combined.push_str(content);
+            }
         }
     }
 

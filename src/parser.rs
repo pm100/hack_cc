@@ -29,6 +29,7 @@ pub enum Type {
     Void,
     Int,
     Char,
+    SignedChar,
     UnsignedChar,
     Long,  // 32-bit (2 words)
     Ptr(Box<Type>),
@@ -42,7 +43,7 @@ impl Type {
     pub fn size(&self) -> usize {
         match self {
             Type::Void => 0,
-            Type::Int | Type::Char | Type::UnsignedChar => 1,
+            Type::Int | Type::Char | Type::SignedChar | Type::UnsignedChar => 1,
             Type::Long => 2,
             Type::Ptr(_) => 1,
             Type::Array(base, n) => base.size() * n,
@@ -105,6 +106,9 @@ pub enum Stmt {
     Switch { expr: Expr, arms: Vec<SwitchArm> },
     Goto(String),
     Label(String, Box<Stmt>),
+    /// Source location annotation: associates a source line number with a statement.
+    /// Emitted by the parser so that codegen can produce debug info.
+    Source(u32, Box<Stmt>),
 }
 
 #[derive(Debug, Clone)]
@@ -259,16 +263,33 @@ impl Parser {
             TokenKind::KwUnsigned | TokenKind::KwSigned => {
                 let is_unsigned = *self.peek() == TokenKind::KwUnsigned;
                 self.advance();
-                // Allow storage-class keywords to appear after signed/unsigned
-                if matches!(self.peek(), TokenKind::KwExtern | TokenKind::KwStatic) {
-                    let base = self.parse_base_type()?; // will set storage class
-                    return Ok(base);
+                // Consume any storage-class keywords that appear after signed/unsigned
+                loop {
+                    match self.peek() {
+                        TokenKind::KwExtern => {
+                            if self.cur_storage_class != StorageClass::None {
+                                let (l, c) = self.cur_lc();
+                                return Err(ParseError::new(l, c, "multiple storage class specifiers"));
+                            }
+                            self.cur_storage_class = StorageClass::Extern;
+                            self.advance();
+                        }
+                        TokenKind::KwStatic => {
+                            if self.cur_storage_class != StorageClass::None {
+                                let (l, c) = self.cur_lc();
+                                return Err(ParseError::new(l, c, "multiple storage class specifiers"));
+                            }
+                            self.cur_storage_class = StorageClass::Static;
+                            self.advance();
+                        }
+                        _ => break,
+                    }
                 }
                 match self.peek().clone() {
                     TokenKind::KwInt  => { self.advance(); return Ok(Type::Int); }
                     TokenKind::KwChar => {
                         self.advance();
-                        return Ok(if is_unsigned { Type::UnsignedChar } else { Type::Char });
+                        return Ok(if is_unsigned { Type::UnsignedChar } else { Type::SignedChar });
                     }
                     TokenKind::KwLong => {
                         self.advance();
@@ -291,7 +312,16 @@ impl Parser {
                 return Ok(Type::Int);
             }
             TokenKind::KwInt  => { self.advance(); return Ok(Type::Int); }
-            TokenKind::KwChar => { self.advance(); return Ok(Type::Char); }
+            TokenKind::KwChar => {
+                self.advance();
+                // Handle 'char signed' and 'char unsigned' orderings (C allows any order)
+                match self.peek().clone() {
+                    TokenKind::KwSigned => { self.advance(); return Ok(Type::SignedChar); }
+                    TokenKind::KwUnsigned => { self.advance(); return Ok(Type::UnsignedChar); }
+                    _ => {}
+                }
+                return Ok(Type::Char);
+            }
             TokenKind::KwVoid => { self.advance(); return Ok(Type::Void); }
             TokenKind::KwStruct => {
                 self.advance();
@@ -377,6 +407,7 @@ impl Parser {
         let (l, c) = self.cur_lc();
         match self.peek().clone() {
             TokenKind::Number(n) => { self.advance(); Ok(n) }
+            TokenKind::CharLit(c) => { self.advance(); Ok(c as i32) }
             got => Err(ParseError::new(l, c, format!("expected integer literal, got {:?}", got))),
         }
     }
@@ -537,7 +568,9 @@ impl Parser {
     fn parse_stmts_until_rbrace(&mut self) -> Result<Vec<Stmt>, ParseError> {
         let mut stmts = Vec::new();
         while *self.peek() != TokenKind::RBrace && *self.peek() != TokenKind::Eof {
-            stmts.push(self.parse_stmt()?);
+            let line = self.cur_lc().0;
+            let stmt = self.parse_stmt()?;
+            stmts.push(Stmt::Source(line, Box::new(stmt)));
         }
         self.expect(&TokenKind::RBrace)?;
         Ok(stmts)
@@ -764,7 +797,12 @@ impl Parser {
         let mut items = Vec::new();
         if *self.peek() != TokenKind::RBrace {
             loop {
-                items.push(self.parse_assign_expr()?);
+                let item = if *self.peek() == TokenKind::LBrace {
+                    self.parse_init_list()?
+                } else {
+                    self.parse_assign_expr()?
+                };
+                items.push(item);
                 if !self.eat(&TokenKind::Comma) { break; }
                 if *self.peek() == TokenKind::RBrace { break; }
             }
@@ -1080,7 +1118,22 @@ impl Parser {
         match self.peek().clone() {
             TokenKind::Number(n) => { self.advance(); Ok(Expr::Num(n)) }
             TokenKind::CharLit(c) => { self.advance(); Ok(Expr::Num(c as i32)) }
-            TokenKind::StringLit(s) => { self.advance(); Ok(Expr::StringLit(s)) }
+            TokenKind::StringLit(s) => {
+                self.advance();
+                // Adjacent string literals are concatenated: "foo" "bar" -> "foobar\0"
+                // Each token already has a trailing \0 from the lexer; strip intermediate
+                // null bytes and keep only the final one.
+                let mut combined = s;
+                while let TokenKind::StringLit(next) = self.peek().clone() {
+                    self.advance();
+                    // Remove the \0 terminator from combined before appending next
+                    if combined.ends_with('\0') {
+                        combined.pop();
+                    }
+                    combined.push_str(&next);
+                }
+                Ok(Expr::StringLit(combined))
+            }
             TokenKind::Ident(name) => {
                 if let Some(&val) = self.enum_map.get(&name) {
                     self.advance();

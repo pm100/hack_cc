@@ -24,6 +24,8 @@ pub struct AssemblerResult {
     /// RAM variables allocated during assembly `(name, address)` sorted by address.
     /// Excludes pre-defined symbols (SP, R0–R15, SCREEN, KBD).
     pub ram_vars: Vec<(String, u16)>,
+    /// Debug entries from `.dbg file:line` directives: `(rom_addr, file, line_no)`.
+    pub dbg_entries: Vec<(u16, String, u32)>,
 }
 
 /// Assemble and also return the full symbol table for map-file generation.
@@ -67,6 +69,7 @@ pub fn assemble_with_symbols(asm: &str, var_base: u16) -> Result<AssemblerResult
     let mut code: Vec<u16> = Vec::with_capacity(rom_addr as usize);
     let mut var_addr: u16 = var_base;
     let mut ram_vars: Vec<(String, u16)> = Vec::new();
+    let mut dbg_entries: Vec<(u16, String, u32)> = Vec::new();
 
     for line in &lines {
         let line = strip_comment(line).trim();
@@ -80,6 +83,17 @@ pub fn assemble_with_symbols(asm: &str, var_base: u16) -> Result<AssemblerResult
                 symbols.insert(sym.to_string(), var_addr);
                 ram_vars.push((sym.to_string(), var_addr));
                 var_addr += 1;
+            }
+            continue;
+        }
+
+        // .dbg file:line — record source location for the next instruction
+        if let Some(rest) = line.strip_prefix(".dbg ").map(str::trim) {
+            if let Some(colon) = rest.rfind(':') {
+                let file = rest[..colon].to_string();
+                if let Ok(line_no) = rest[colon + 1..].parse::<u32>() {
+                    dbg_entries.push((code.len() as u16, file, line_no));
+                }
             }
             continue;
         }
@@ -115,7 +129,7 @@ pub fn assemble_with_symbols(asm: &str, var_base: u16) -> Result<AssemblerResult
     rom_labels.sort_by_key(|&(_, addr)| addr);
     ram_vars.sort_by_key(|&(_, addr)| addr);
 
-    Ok(AssemblerResult { words: code, rom_labels, ram_vars })
+    Ok(AssemblerResult { words: code, rom_labels, ram_vars, dbg_entries })
 }
 
 /// Assemble Hack assembly source text into a vector of 16-bit machine words.

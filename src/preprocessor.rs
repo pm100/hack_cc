@@ -104,6 +104,8 @@ impl PreprocCtx {
         }
 
         let mut output = String::new();
+        // Emit initial #line marker so the lexer knows the starting file/line
+        output.push_str(&format!("#line 1 \"{}\"\n", escape_line_filename(file)));
         // Stack of (active, else_seen) for #ifdef/#if nesting.
         // `active` = whether the current branch is being emitted.
         let mut cond_stack: Vec<(bool, bool)> = Vec::new();
@@ -211,6 +213,8 @@ impl PreprocCtx {
                                     depth + 1,
                                 )?;
                                 output.push_str(&expanded);
+                                // Resume parent file at the line after the #include
+                                output.push_str(&format!("#line {} \"{}\"\n", line_no + 1, escape_line_filename(file)));
                             }
                             IncludeKind::Relative(path_str) => {
                                 let inc_path = resolve_include(&path_str, base_dir, file, line_no)?;
@@ -227,6 +231,8 @@ impl PreprocCtx {
                                     depth + 1,
                                 )?;
                                 output.push_str(&expanded);
+                                // Resume parent file at the line after the #include
+                                output.push_str(&format!("#line {} \"{}\"\n", line_no + 1, escape_line_filename(file)));
                             }
                         }
                     }
@@ -705,4 +711,9 @@ fn parse_primary_expr(t: &[ExprToken], p: &mut usize) -> Result<i64, String> {
         }
         other => Err(format!("unexpected token {:?} in #if expression", other)),
     }
+}
+
+/// Escape a filename for use in a `#line` directive (backslash → `\\`).
+fn escape_line_filename(name: &str) -> String {
+    name.replace('\\', "\\\\")
 }
