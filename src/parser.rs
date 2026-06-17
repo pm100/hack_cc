@@ -99,6 +99,9 @@ pub enum Stmt {
     },
     Return(Option<Expr>),
     Decl(Type, String, Option<Expr>, StorageClass),
+    /// Local function declaration: `int foo(int, int);` inside a function body.
+    /// Params: name, return type, parameter types, has_external_linkage (i.e., not static).
+    FuncDecl(String, Type, Vec<Type>, bool),
     Expr(Expr),
     DoWhile(Box<Stmt>, Expr),
     Break,
@@ -772,8 +775,15 @@ impl Parser {
                 let (l, c) = self.cur_lc();
                 return Err(ParseError::new(l, c, "'static' not allowed on local function declaration"));
             }
-            let _ = self.parse_func_rest(ty, name)?;
-            return Ok(Stmt::Block(vec![]));
+            let func_def = self.parse_func_rest(ty.clone(), name.clone())?;
+            // Reject nested function definitions (only declarations are allowed in local scope)
+            if !func_def.is_decl {
+                let (l, c) = self.cur_lc();
+                return Err(ParseError::new(l, c, "nested function definitions are not allowed"));
+            }
+            let param_types: Vec<Type> = func_def.params.iter().map(|(ty, _)| ty.clone()).collect();
+            let has_external_linkage = sc != StorageClass::Static; // extern or no storage class → external
+            return Ok(Stmt::FuncDecl(name, ty, param_types, has_external_linkage));
         }
         let init = if self.eat(&TokenKind::Assign) {
             if *self.peek() == TokenKind::LBrace {

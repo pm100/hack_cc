@@ -255,12 +255,94 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
         }
     }
 
-    let defined_funcs: HashSet<String> = func_sigs.keys().cloned().collect();
+    // Collect local function declarations from all function bodies and check for signature conflicts
+    fn collect_local_func_decls(
+        stmts: &[Stmt],
+        func_sigs: &mut HashMap<String, (Type, usize)>,
+        func_params: &mut HashMap<String, Vec<Type>>,
+    ) -> Result<(), SemaError> {
+        for stmt in stmts {
+            match stmt {
+                Stmt::FuncDecl(name, ret_ty, param_types, _) => {
+                    // Check if this function is already declared with a different signature
+                    if let Some((existing_ret_ty, existing_param_count)) = func_sigs.get(name) {
+                        if existing_ret_ty != ret_ty || *existing_param_count != param_types.len() {
+                            return Err(SemaError::new(format!("conflicting types for function '{}'", name)));
+                        }
+                        // Also check parameter types if available
+                        if let Some(existing_params) = func_params.get(name) {
+                            let old_adj: Vec<Type> = existing_params.iter().map(adjust_param_type).collect();
+                            let new_adj: Vec<Type> = param_types.iter().map(adjust_param_type).collect();
+                            if old_adj != new_adj {
+                                return Err(SemaError::new(format!("conflicting parameter types for function '{}'", name)));
+                            }
+                        }
+                    } else {
+                        // First time seeing this function - add it
+                        func_sigs.insert(name.clone(), (ret_ty.clone(), param_types.len()));
+                        func_params.insert(name.clone(), param_types.clone());
+                    }
+                }
+                Stmt::Block(inner) => collect_local_func_decls(inner, func_sigs, func_params)?,
+                Stmt::If(_, then_stmt, else_stmt) => {
+                    collect_local_func_decls(&[then_stmt.as_ref().clone()], func_sigs, func_params)?;
+                    if let Some(e) = else_stmt {
+                        collect_local_func_decls(&[e.as_ref().clone()], func_sigs, func_params)?;
+                    }
+                }
+                Stmt::While(_, body) | Stmt::DoWhile(body, _) => {
+                    collect_local_func_decls(&[body.as_ref().clone()], func_sigs, func_params)?;
+                }
+                Stmt::For { init, body, .. } => {
+                    if let Some(s) = init {
+                        collect_local_func_decls(&[s.as_ref().clone()], func_sigs, func_params)?;
+                    }
+                    collect_local_func_decls(&[body.as_ref().clone()], func_sigs, func_params)?;
+                }
+                Stmt::Switch { arms, .. } => {
+                    for arm in arms {
+                        collect_local_func_decls(&arm.stmts, func_sigs, func_params)?;
+                    }
+                }
+                Stmt::Label(_, inner) | Stmt::Source(_, inner) => {
+                    collect_local_func_decls(&[inner.as_ref().clone()], func_sigs, func_params)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    for f in &prog.funcs {
+        if !f.is_decl {
+            collect_local_func_decls(&f.body, &mut func_sigs, &mut func_params)?;
+        }
+    }
+
+
+    // Build visibility map: for each function definition, track which functions
+    // were declared/defined before it (to catch undeclared function calls).
+    let mut visibility: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut declared_so_far: HashSet<String> = HashSet::new();
+    for f in &prog.funcs {
+        if !f.is_decl {
+            // This is a definition - capture what was declared before it
+            visibility.insert(f.name.clone(), declared_so_far.clone());
+        }
+        // Add this function to the declared set (whether decl or def)
+        declared_so_far.insert(f.name.clone());
+    }
+
     let mut funcs_out = Vec::new();
     for f in prog.funcs {
         if f.is_decl { continue; }
-        let (af, static_locals) = analyze_func(f, &global_map, &struct_defs, &func_sigs, &func_params)?;
-        check_calls_defined_ext(&af.body, &defined_funcs, &[], user_externals)?;
+        let fname = f.name.clone();
+        let (af, static_locals) = analyze_func(f, &global_map, &struct_defs, &func_sigs, &func_params, &func_linkage, &visibility)?;
+        // Check that all called functions were declared before this function
+        // Include the function itself in the visibility set (for recursion)
+        let mut visible_funcs = visibility.get(&fname).unwrap().clone();
+        visible_funcs.insert(fname.clone());
+        check_calls_defined_ext(&af.body, &visible_funcs, &[], user_externals)?;
         check_call_arity(&af.body, &func_sigs, &func_variadic)?;
         globals_out.extend(static_locals);
         funcs_out.push(af);
@@ -418,7 +500,17 @@ fn flatten_init_item(item: &Expr, elem_ty: &Type, vals: &mut Vec<i32>) -> Result
 
 fn check_calls_defined_ext(
     stmts: &[Stmt],
-    defined: &HashSet<String>,
+    initially_defined: &HashSet<String>,
+    builtins: &[&str],
+    externals: &[&str],
+) -> Result<(), SemaError> {
+    let mut defined = initially_defined.clone();
+    check_calls_stmts_ext(stmts, &mut defined, builtins, externals)
+}
+
+fn check_calls_stmts_ext(
+    stmts: &[Stmt],
+    defined: &mut HashSet<String>,
     builtins: &[&str],
     externals: &[&str],
 ) -> Result<(), SemaError> {
@@ -428,7 +520,7 @@ fn check_calls_defined_ext(
     Ok(())
 }
 
-fn check_calls_stmt_ext(stmt: &Stmt, defined: &HashSet<String>, builtins: &[&str], externals: &[&str]) -> Result<(), SemaError> {
+fn check_calls_stmt_ext(stmt: &Stmt, defined: &mut HashSet<String>, builtins: &[&str], externals: &[&str]) -> Result<(), SemaError> {
     match stmt {
         Stmt::Expr(e) => check_calls_expr_ext(e, defined, builtins, externals)?,
         Stmt::Return(Some(e)) => check_calls_expr_ext(e, defined, builtins, externals)?,
@@ -452,7 +544,7 @@ fn check_calls_stmt_ext(stmt: &Stmt, defined: &HashSet<String>, builtins: &[&str
             if let Some(e) = incr { check_calls_expr_ext(e, defined, builtins, externals)?; }
             check_calls_stmt_ext(body, defined, builtins, externals)?;
         }
-        Stmt::Block(stmts) => check_calls_defined_ext(stmts, defined, builtins, externals)?,
+        Stmt::Block(stmts) => check_calls_stmts_ext(stmts, defined, builtins, externals)?,
         Stmt::Switch { expr, arms } => {
             check_calls_expr_ext(expr, defined, builtins, externals)?;
             for arm in arms {
@@ -461,6 +553,10 @@ fn check_calls_stmt_ext(stmt: &Stmt, defined: &HashSet<String>, builtins: &[&str
         }
         Stmt::Break | Stmt::Continue => {}
         Stmt::Source(_, inner) => check_calls_stmt_ext(inner, defined, builtins, externals)?,
+        Stmt::FuncDecl(name, _, _, _) => {
+            // Local function declaration - add to the defined set
+            defined.insert(name.clone());
+        }
         _ => {}
     }
     Ok(())
@@ -554,7 +650,7 @@ fn check_call_arity_stmt(
         }
         Stmt::Label(_, inner) => check_call_arity_stmt(inner, func_sigs, variadic)?,
         Stmt::Source(_, inner) => check_call_arity_stmt(inner, func_sigs, variadic)?,
-        Stmt::Break | Stmt::Continue | Stmt::Return(None) | Stmt::Goto(_) => {}
+        Stmt::Break | Stmt::Continue | Stmt::Return(None) | Stmt::Goto(_) | Stmt::FuncDecl(_, _, _, _) => {}
     }
     Ok(())
 }
@@ -619,6 +715,9 @@ fn check_scope_flow(
     body: &[Stmt],
     known_globals: &HashSet<String>,
     func_sigs: &HashMap<String, (Type, usize)>,
+    func_linkage: &HashMap<String, bool>,
+    file_scope_visibility: &HashMap<String, HashSet<String>>,
+    current_func_name: &str,
 ) -> Result<(), SemaError> {
     let mut scope_stack: Vec<HashMap<String, StorageClass>> = Vec::new();
     let mut param_scope: HashMap<String, StorageClass> = HashMap::new();
@@ -628,7 +727,11 @@ fn check_scope_flow(
         }
     }
     scope_stack.push(param_scope);
-    check_sf_stmts(body, &mut scope_stack, known_globals, func_sigs, false, false)?;
+    // Get the set of functions that were declared at file scope before this function
+    let visible_at_file_scope = file_scope_visibility.get(current_func_name)
+        .map(|s| s.clone())
+        .unwrap_or_else(HashSet::new);
+    check_sf_stmts(body, &mut scope_stack, known_globals, func_sigs, func_linkage, &visible_at_file_scope, false, false)?;
     scope_stack.pop();
     Ok(())
 }
@@ -638,11 +741,13 @@ fn check_sf_stmts(
     ss: &mut Vec<HashMap<String, StorageClass>>,
     globals: &HashSet<String>,
     func_sigs: &HashMap<String, (Type, usize)>,
+    func_linkage: &HashMap<String, bool>,
+    file_scope_visibility: &HashSet<String>,
     can_break: bool,
     can_continue: bool,
 ) -> Result<(), SemaError> {
     for stmt in stmts {
-        check_sf_stmt(stmt, ss, globals, func_sigs, can_break, can_continue)?;
+        check_sf_stmt(stmt, ss, globals, func_sigs, func_linkage, file_scope_visibility, can_break, can_continue)?;
     }
     Ok(())
 }
@@ -652,6 +757,8 @@ fn check_sf_stmt(
     ss: &mut Vec<HashMap<String, StorageClass>>,
     globals: &HashSet<String>,
     func_sigs: &HashMap<String, (Type, usize)>,
+    func_linkage: &HashMap<String, bool>,
+    file_scope_visibility: &HashSet<String>,
     can_break: bool,
     can_continue: bool,
 ) -> Result<(), SemaError> {
@@ -667,36 +774,38 @@ fn check_sf_stmt(
             } else {
                 ss.last_mut().unwrap().insert(name.clone(), sc.clone());
             }
+            // Variables CAN shadow functions from outer scopes (that's legal in C)
+            // So we don't reject based on sf_ident_in_scope here
             if let Some(e) = init {
                 check_sf_expr(e, ss, globals, func_sigs)?;
             }
         }
         Stmt::Block(stmts) => {
             ss.push(HashMap::new());
-            check_sf_stmts(stmts, ss, globals, func_sigs, can_break, can_continue)?;
+            check_sf_stmts(stmts, ss, globals, func_sigs, func_linkage, file_scope_visibility, can_break, can_continue)?;
             ss.pop();
         }
         Stmt::If(cond, then, els) => {
             check_sf_expr(cond, ss, globals, func_sigs)?;
-            check_sf_stmt(then, ss, globals, func_sigs, can_break, can_continue)?;
+            check_sf_stmt(then, ss, globals, func_sigs, func_linkage, file_scope_visibility, can_break, can_continue)?;
             if let Some(e) = els {
-                check_sf_stmt(e, ss, globals, func_sigs, can_break, can_continue)?;
+                check_sf_stmt(e, ss, globals, func_sigs, func_linkage, file_scope_visibility, can_break, can_continue)?;
             }
         }
         Stmt::While(cond, body) => {
             check_sf_expr(cond, ss, globals, func_sigs)?;
-            check_sf_stmt(body, ss, globals, func_sigs, true, true)?;
+            check_sf_stmt(body, ss, globals, func_sigs, func_linkage, file_scope_visibility, true, true)?;
         }
         Stmt::DoWhile(body, cond) => {
-            check_sf_stmt(body, ss, globals, func_sigs, true, true)?;
+            check_sf_stmt(body, ss, globals, func_sigs, func_linkage, file_scope_visibility, true, true)?;
             check_sf_expr(cond, ss, globals, func_sigs)?;
         }
         Stmt::For { init, cond, incr, body } => {
             ss.push(HashMap::new());
-            if let Some(s) = init { check_sf_stmt(s, ss, globals, func_sigs, false, false)?; }
+            if let Some(s) = init { check_sf_stmt(s, ss, globals, func_sigs, func_linkage, file_scope_visibility, false, false)?; }
             if let Some(e) = cond { check_sf_expr(e, ss, globals, func_sigs)?; }
             if let Some(e) = incr { check_sf_expr(e, ss, globals, func_sigs)?; }
-            check_sf_stmt(body, ss, globals, func_sigs, true, true)?;
+            check_sf_stmt(body, ss, globals, func_sigs, func_linkage, file_scope_visibility, true, true)?;
             ss.pop();
         }
         Stmt::Return(e) => {
@@ -715,17 +824,56 @@ fn check_sf_stmt(
         }
         Stmt::Goto(_) => {}
         Stmt::Label(_, inner) => {
-            check_sf_stmt(inner, ss, globals, func_sigs, can_break, can_continue)?;
+            check_sf_stmt(inner, ss, globals, func_sigs, func_linkage, file_scope_visibility, can_break, can_continue)?;
         }
         Stmt::Switch { expr, arms } => {
             check_sf_expr(expr, ss, globals, func_sigs)?;
             ss.push(HashMap::new());
             for arm in arms {
-                check_sf_stmts(&arm.stmts, ss, globals, func_sigs, true, can_continue)?;
+                check_sf_stmts(&arm.stmts, ss, globals, func_sigs, func_linkage, file_scope_visibility, true, can_continue)?;
             }
             ss.pop();
         }
-        Stmt::Source(_, inner) => check_sf_stmt(inner, ss, globals, func_sigs, can_break, can_continue)?,
+        Stmt::Source(_, inner) => check_sf_stmt(inner, ss, globals, func_sigs, func_linkage, file_scope_visibility, can_break, can_continue)?,
+        Stmt::FuncDecl(name, _ret_ty, _param_types, has_external_linkage) => {
+            // Check for conflict with local variables in the current scope
+            if let Some(prev_sc) = ss.last().unwrap().get(name) {
+                // If it's already a function (marked with Extern), allow redeclaration
+                if *prev_sc != StorageClass::Extern {
+                    return Err(SemaError::new(format!("'{}' redeclared as different kind of symbol", name)));
+                }
+            }
+            // Function declarations CAN shadow variables from outer scopes (that's legal in C)
+            
+            // Check for linkage conflicts:
+            // If we're declaring a function with external linkage locally, and there's a
+            // file-scope static definition that hasn't been declared yet at file scope,
+            // that's an error (trying to give external linkage to something that will be static).
+            if *has_external_linkage {
+                // This local declaration has external linkage
+                if let Some(&is_static) = func_linkage.get(name) {
+                    if is_static {
+                        // The file-scope definition is static. This is only OK if the function
+                        // was declared at file scope before this point (so we already knew about it).
+                        if !file_scope_visibility.contains(name) {
+                            // The static definition exists but wasn't declared yet at file scope.
+                            // This means this local extern declaration is trying to give external
+                            // linkage to something that will later be defined as static - that's invalid.
+                            return Err(SemaError::new(format!("conflicting linkage for function '{}'", name)));
+                        }
+                        // Otherwise, the static function was already declared at file scope,
+                        // so this local declaration is just referencing it (that's OK).
+                    }
+                }
+            }
+            
+            // NOTE: Signature conflicts are checked during the pre-pass in analyze_impl,
+            // so we don't need to check here.
+            
+            // Track the function declaration in the current scope (to prevent variable conflicts)
+            // We use StorageClass::Extern as a marker for "this is a function, not a variable"
+            ss.last_mut().unwrap().insert(name.clone(), StorageClass::Extern);
+        }
     }
     Ok(())
 }
@@ -751,9 +899,15 @@ fn check_sf_expr(
             }
         }
         Expr::Call(name, args) => {
-            if sf_ident_in_current_scope(name, ss)
-                || (!func_sigs.contains_key(name) && (sf_ident_in_scope(name, ss) || globals.contains(name)))
-            {
+            // Check if this is a variable (not a function) being called
+            // First, check if there's a local variable with this name (shadowing a function)
+            if let Some(sc) = ss.last().and_then(|s| s.get(name)) {
+                // If it's NOT our function marker (Extern), it's a variable - reject
+                if *sc != StorageClass::Extern {
+                    return Err(SemaError::new(format!("'{}' is not a function", name)));
+                }
+            } else if !func_sigs.contains_key(name) && (sf_ident_in_scope(name, ss) || globals.contains(name)) {
+                // Not in func_sigs, but IS a variable in some scope - reject
                 return Err(SemaError::new(format!("'{}' is not a function", name)));
             }
             for a in args { check_sf_expr(a, ss, globals, func_sigs)?; }
@@ -1559,7 +1713,7 @@ fn check_types_stmt(
         }
         Stmt::Label(_, inner) => check_types_stmt(inner, vars, func_sigs, func_params, struct_defs, ret_ty)?,
         Stmt::Source(_, inner) => check_types_stmt(inner, vars, func_sigs, func_params, struct_defs, ret_ty)?,
-        Stmt::Break | Stmt::Continue | Stmt::Goto(_) => {}
+        Stmt::Break | Stmt::Continue | Stmt::Goto(_) | Stmt::FuncDecl(_, _, _, _) => {}
     }
     Ok(())
 }
@@ -1584,12 +1738,14 @@ fn analyze_func(
     struct_defs: &HashMap<String, Vec<(String, Type)>>,
     func_sigs: &HashMap<String, (Type, usize)>,
     func_params: &HashMap<String, Vec<Type>>,
+    func_linkage: &HashMap<String, bool>,
+    file_scope_visibility: &HashMap<String, HashSet<String>>,
 ) -> Result<(AnnotatedFunc, Vec<(String, Type, Option<GlobalInit>)>), SemaError> {
     let known_globals: HashSet<String> = globals.keys()
         .chain(func_sigs.keys())
         .cloned()
         .collect();
-    check_scope_flow(&f.params, &f.body, &known_globals, func_sigs)?;
+    check_scope_flow(&f.params, &f.body, &known_globals, func_sigs, func_linkage, file_scope_visibility, &f.name)?;
     check_labels_gotos(&f.body)?;
     check_duplicate_cases(&f.body)?;
 
@@ -1717,7 +1873,7 @@ fn collect_locals_stmt(
                 collect_locals(arm.stmts.as_slice(), vars, next_idx, struct_defs, func_name, static_locals, globals)?;
             }
         }
-        Stmt::Return(_) | Stmt::Expr(_) | Stmt::Break | Stmt::Continue | Stmt::Goto(_) => {}
+        Stmt::Return(_) | Stmt::Expr(_) | Stmt::Break | Stmt::Continue | Stmt::Goto(_) | Stmt::FuncDecl(_, _, _, _) => {}
         Stmt::Label(_, stmt) => collect_locals_stmt(stmt, vars, next_idx, struct_defs, func_name, static_locals, globals)?,
         Stmt::Source(_, inner) => collect_locals_stmt(inner, vars, next_idx, struct_defs, func_name, static_locals, globals)?,
     }
@@ -1950,6 +2106,9 @@ fn alpha_rename_stmt(
                 }
                 scopes.pop();
             }
+        }
+        Stmt::FuncDecl(_, _, _, _) => {
+            // Function declarations don't bind variables, nothing to rename
         }
     }
 }

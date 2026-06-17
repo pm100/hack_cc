@@ -992,7 +992,10 @@ impl Gen {
                 let field_ty = self.lvalue_type(expr, vars);
                 self.gen_addr(expr, vars)?;
                 self.pop_d();
-                if matches!(field_ty, Some(Type::Long)) {
+                // Arrays decay to pointers - return address, don't load
+                if matches!(field_ty, Some(Type::Array(_, _))) {
+                    self.push_d();
+                } else if matches!(field_ty, Some(Type::Long)) {
                     self.load_long_from_addr_d();
                 } else {
                     self.emit("A=D");
@@ -1206,20 +1209,20 @@ impl Gen {
                     }
                     _ => 1,
                 };
-                self.gen_expr(base, vars)?;
+                self.gen_expr(base, vars)?;  // For arrays, this returns address; for pointers, returns value
                 self.gen_expr(idx, vars)?;
                 self.pop_d();   // D = idx
                 if stride == 1 {
                     self.emit("@R14");
                     self.emit("M=D");
-                    self.pop_d();       // D = base
+                    self.pop_d();       // D = base address
                     self.emit("@R14");
                     self.emit("D=D+M");
                 } else {
                     self.emit_stride_mul(stride);
                     self.emit("@R14");
                     self.emit("M=D");   // save idx*stride
-                    self.pop_d();       // D = base
+                    self.pop_d();       // D = base address
                     self.emit("@R14");
                     self.emit("D=D+M");
                 }
@@ -2365,28 +2368,120 @@ impl Gen {
         storage: &VarStorage,
         vars: &HashMap<String, VarInfo>,
     ) -> Result<(), CodegenError> {
-        // Struct initializer: items are field values; use per-field offsets, not struct stride.
+        // Special case: if elem_ty is a Struct and the first item is NOT an InitList,
+        // then this is a "flat" struct initializer where items are field values
         if let Type::Struct(struct_name) = elem_ty {
-            let fields = self.struct_defs.get(struct_name).cloned().unwrap_or_default();
-            let mut field_offset = base_offset;
-            for (item, (_, field_ty)) in items.iter().zip(fields.iter()) {
-                let field_size = self.type_size(field_ty).max(1);
-                if let Expr::InitList(sub_items) = item {
-                    self.gen_array_init(field_ty, sub_items, field_offset, storage, vars)?;
-                } else {
-                    self.gen_expr(item, vars)?;
-                    self.pop_d();
-                    self.store_d_at_var_offset(storage, field_offset);
+            if !items.is_empty() && !matches!(items[0], Expr::InitList(_)) {
+                // Flat struct initializer: items are field values
+                let fields = self.struct_defs.get(struct_name).cloned().unwrap_or_default();
+                let mut field_offset = base_offset;
+                let mut item_idx = 0;
+                
+                for (_, field_ty) in &fields {
+                    let field_size = self.type_size(field_ty).max(1);
+                    
+                    if item_idx >= items.len() {
+                        break;
+                    }
+                    
+                    match field_ty {
+                        Type::Array(arr_elem_ty, arr_len) => {
+                            // Array field: collect items for this array
+                            let needed = *arr_len;
+                            let available = (item_idx..items.len()).take(needed).count();
+                            let arr_items = &items[item_idx..item_idx + available];
+                            
+                            // Check if this is a nested initializer list
+                            if arr_items.len() == 1 {
+                                if let Expr::InitList(nested) = &arr_items[0] {
+                                    // Nested array initializer like {{1, 2, 3}}
+                                    self.gen_array_init(arr_elem_ty, nested, field_offset, storage, vars)?;
+                                    item_idx += 1;
+                                    field_offset += field_size;
+                                    continue;
+                                }
+                            }
+                            
+                            // Flat array initializer like {1, 2, 3}
+                            self.gen_array_init(arr_elem_ty, arr_items, field_offset, storage, vars)?;
+                            item_idx += available;
+                        }
+                        _ => {
+                            // Non-array field
+                            if let Expr::InitList(nested_items) = &items[item_idx] {
+                                self.gen_array_init(field_ty, nested_items, field_offset, storage, vars)?;
+                            } else {
+                                self.gen_expr(&items[item_idx], vars)?;
+                                self.pop_d();
+                                self.store_d_at_var_offset(storage, field_offset);
+                            }
+                            item_idx += 1;
+                        }
+                    }
+                    
+                    field_offset += field_size;
                 }
-                field_offset += field_size;
+                
+                return Ok(());
             }
-            return Ok(());
         }
-
+        
+        // Array of elements (including array of structs with nested initializers)
         let inner_size = self.type_size(elem_ty).max(1);
         for (i, item) in items.iter().enumerate() {
             let item_offset = base_offset + i * inner_size;
             match (elem_ty, item) {
+                // Struct element with initializer list: recurse to initialize the struct's fields
+                (Type::Struct(struct_name), Expr::InitList(sub_items)) => {
+                    let fields = self.struct_defs.get(struct_name).cloned().unwrap_or_default();
+                    let mut field_offset = item_offset;
+                    let mut item_idx = 0;
+                    
+                    for (_, field_ty) in &fields {
+                        let field_size = self.type_size(field_ty).max(1);
+                        
+                        if item_idx >= sub_items.len() {
+                            break;
+                        }
+                        
+                        match field_ty {
+                            Type::Array(arr_elem_ty, arr_len) => {
+                                // Array field: collect items for this array
+                                let needed = *arr_len;
+                                let available = (item_idx..sub_items.len()).take(needed).count();
+                                let arr_items = &sub_items[item_idx..item_idx + available];
+                                
+                                // Check if this is a nested initializer list
+                                if arr_items.len() == 1 {
+                                    if let Expr::InitList(nested) = &arr_items[0] {
+                                        // Nested array initializer like {{1, 2, 3}}
+                                        self.gen_array_init(arr_elem_ty, nested, field_offset, storage, vars)?;
+                                        item_idx += 1;
+                                        field_offset += field_size;
+                                        continue;
+                                    }
+                                }
+                                
+                                // Flat array initializer like {1, 2, 3}
+                                self.gen_array_init(arr_elem_ty, arr_items, field_offset, storage, vars)?;
+                                item_idx += available;
+                            }
+                            _ => {
+                                // Non-array field
+                                if let Expr::InitList(nested_items) = &sub_items[item_idx] {
+                                    self.gen_array_init(field_ty, nested_items, field_offset, storage, vars)?;
+                                } else {
+                                    self.gen_expr(&sub_items[item_idx], vars)?;
+                                    self.pop_d();
+                                    self.store_d_at_var_offset(storage, field_offset);
+                                }
+                                item_idx += 1;
+                            }
+                        }
+                        
+                        field_offset += field_size;
+                    }
+                }
                 // Nested array with sub-initializer: recurse
                 (Type::Array(sub_elem_ty, _), Expr::InitList(sub_items)) => {
                     let sub_ty = sub_elem_ty.as_ref().clone();
@@ -2736,6 +2831,9 @@ impl Gen {
                     self.emit(&format!(".dbg {}:{}", file, line));
                 }
                 self.gen_stmt(inner, vars, func_name)?;
+            }
+            Stmt::FuncDecl(_, _, _, _) => {
+                // Function declarations don't generate any code
             }
         }
         Ok(())
