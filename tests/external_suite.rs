@@ -71,9 +71,6 @@ const SKIP_PATHS: &[&str] = &[
     "chapter_18/valid/no_structure_parameters/struct_copy/",
     // Chapter 18: sizeof on struct types / double type not supported
     "chapter_18/valid/no_structure_parameters/size_and_offset_calculations/",
-    // Chapter 18: struct parameters / return values not yet implemented
-    "chapter_18/valid/params_and_returns/",
-    "chapter_18/valid/parameters/",
     // Chapter 18: static_vs_auto uses designated initializers / features not yet supported
     "chapter_18/valid/no_structure_parameters/smoke_tests/static_vs_auto.c",
     // Chapter 18: extra_credit uses union / goto / other unsupported extensions
@@ -83,14 +80,6 @@ const SKIP_PATHS: &[&str] = &[
 /// Relative path prefixes for *invalid* tests that our compiler currently accepts
 /// (known missing semantic checks — not yet implemented).
 const SKIP_INVALID_PATHS: &[&str] = &[
-    // ch10: linkage conflict and redeclaration checks not yet implemented
-    "chapter_10/invalid_types/conflicting_variable_linkage_2.c",
-    "chapter_10/invalid_types/redeclare_file_scope_var_as_fun.c",
-    "chapter_10/invalid_types/redeclare_fun_as_var.c",
-    "chapter_10/invalid_declarations/out_of_scope_extern_var.c",
-    "chapter_10/invalid_declarations/undeclared_global_variable.c",
-    // ch12: signed/unsigned conflict check not yet implemented
-    "chapter_12/invalid_types/conflicting_signed_unsigned.c",
     // ch18: struct type-checking not yet implemented
     "chapter_18/invalid_types/",
 ];

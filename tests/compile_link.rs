@@ -15,6 +15,31 @@ use std::process::Command;
 
 const INCLUDE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/include");
 
+fn default_compile_options() -> hack_cc::CompileOptions {
+    hack_cc::CompileOptions {
+        include_dirs: vec![PathBuf::from(INCLUDE_DIR)],
+        ..Default::default()
+    }
+}
+
+fn compile_result(src: &str) -> Result<hack_cc::CompiledProgram, hack_cc::Error> {
+    hack_cc::compile_with_full_options(src, None, &default_compile_options())
+}
+
+fn assert_compile_fails(src: &str, expected: &str) {
+    let err = match compile_result(src) {
+        Ok(_) => panic!("expected compilation to fail"),
+        Err(err) => err,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains(expected),
+        "expected error containing {:?}, got {:?}",
+        expected,
+        msg
+    );
+}
+
 fn tmp_dir() -> PathBuf {
     let dir = std::env::temp_dir().join("hack_cc_link_tests");
     fs::create_dir_all(&dir).unwrap();
@@ -1173,6 +1198,171 @@ fn test_compile_files_api_with_stdlib() {
     let (code, out) = run(&asm_path);
     assert_eq!(code, 0);
     assert_eq!(out, "Z");
+}
+
+// ── Open-bug regression tests ─────────────────────────────────────────────────
+
+#[test]
+fn test_rejects_file_scope_variable_used_before_declaration() {
+    let src = "int main(void) { return g; }\nint g = 7;";
+    assert_compile_fails(src, "undeclared identifier 'g'");
+}
+
+#[test]
+fn test_rejects_block_extern_used_out_of_scope() {
+    let src = r#"
+int main(void) {
+    {
+        extern int g;
+    }
+    return g;
+}
+int g = 9;
+"#;
+    assert_compile_fails(src, "undeclared identifier 'g'");
+}
+
+#[test]
+fn test_rejects_local_extern_variable_conflicting_with_file_scope_function() {
+    let src = r#"
+int foo(void);
+int main(void) {
+    extern int foo;
+    return 0;
+}
+"#;
+    assert_compile_fails(src, "different kind of symbol");
+}
+
+#[test]
+fn test_rejects_local_function_decl_conflicting_with_file_scope_variable() {
+    let src = r#"
+int foo;
+int main(void) {
+    int foo(void);
+    return 0;
+}
+"#;
+    assert_compile_fails(src, "different kind of symbol");
+}
+
+#[test]
+fn test_rejects_local_extern_variable_conflicting_with_file_scope_static() {
+    let src = r#"
+int main(void) {
+    extern int counter;
+    return 0;
+}
+static int counter;
+"#;
+    assert_compile_fails(src, "conflicting linkage for variable 'counter'");
+}
+
+#[test]
+fn test_rejects_conflicting_signed_unsigned_redeclaration() {
+    let src = "unsigned value;\nint value;\nint main(void) { return 0; }";
+    assert_compile_fails(src, "conflicting types for variable 'value'");
+}
+
+#[test]
+fn test_accepts_incomplete_struct_forward_declaration() {
+    let src = r#"
+struct node;
+struct node *gp;
+struct node { int value; };
+int main(void) { return 0; }
+"#;
+    let asm = compile_whole(src, "incomplete_struct_forward_decl");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn test_member_access_from_returned_struct_temporary() {
+    let src = r#"
+struct pair { int x; int y; };
+struct pair make_pair(void) {
+    struct pair p = { 5, 7 };
+    return p;
+}
+int main(void) { return make_pair().y; }
+"#;
+    let asm = compile_whole(src, "struct_temp_member");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 7);
+}
+
+#[test]
+fn test_array_member_access_from_returned_struct_temporary() {
+    let src = r#"
+struct wrap { int values[2]; };
+struct wrap make_wrap(void) {
+    struct wrap w = { { 11, 22 } };
+    return w;
+}
+int main(void) { return make_wrap().values[1]; }
+"#;
+    let asm = compile_whole(src, "struct_temp_array_member");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 22);
+}
+
+#[test]
+fn test_repeated_array_access_from_returned_struct_temporary() {
+    let src = r#"
+struct s {
+    int arr[3];
+};
+
+struct s f(void) {
+    struct s retval = {{1, 2, 3}};
+    return retval;
+}
+
+int main(void) {
+    int i = f().arr[0];
+    int j = f().arr[1];
+    int k = f().arr[2];
+    if (i != 1) return 1;
+    if (j != 2) return 2;
+    if (k != 3) return 3;
+    return 0;
+}
+"#;
+    let asm = compile_whole(src, "struct_temp_array_repeated");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn test_struct_param_and_return_after_incomplete_forward_decl() {
+    let src = r#"
+struct s;
+struct s increment_struct(struct s param);
+
+struct s {
+    int a;
+    int b;
+};
+
+int main(void) {
+    struct s arg = {1, 2};
+    struct s val = increment_struct(arg);
+    if (val.a != 2 || val.b != 3) {
+        return 1;
+    }
+    return 0;
+}
+
+struct s increment_struct(struct s param) {
+    param.a = param.a + 1;
+    param.b = param.b + 1;
+    return param;
+}
+"#;
+    let asm = compile_whole(src, "struct_param_return_incomplete");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 0);
 }
 
 // ── Static locals and file-scope statics ─────────────────────────────────────

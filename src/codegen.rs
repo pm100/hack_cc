@@ -571,6 +571,83 @@ impl Gen {
         self.push_d();
     }
 
+    /// Load `n_words` consecutive words from address held in D.
+    /// Stack after: [..., word0, word1, ... wordN-1] with the last word on top.
+    fn load_words_from_addr_d(&mut self, n_words: usize) {
+        self.emit("@R13");
+        self.emit("M=D");
+        for i in 0..n_words {
+            if i == 0 {
+                self.emit("@R13");
+                self.emit("A=M");
+            } else {
+                self.emit("@R13");
+                self.emit("D=M");
+                self.emit(&format!("@{}", i));
+                self.emit("A=D+A");
+            }
+            self.emit("D=M");
+            self.push_d();
+        }
+    }
+
+    fn load_value_from_addr_d(&mut self, ty: &Type) {
+        match ty {
+            Type::Array(..) => self.push_d(),
+            Type::Long => self.load_long_from_addr_d(),
+            Type::Struct(_) => {
+                let size = self.type_size(ty).max(1);
+                self.load_words_from_addr_d(size);
+            }
+            _ => {
+                self.emit("A=D");
+                self.emit("D=M");
+                self.push_d();
+            }
+        }
+    }
+
+    fn emit_sp_minus_to_d(&mut self, words: usize) {
+        self.emit("@SP");
+        self.emit("D=M");
+        if words > 0 {
+            self.emit(&format!("@{}", words));
+            self.emit("D=D-A");
+        }
+    }
+
+    fn emit_return_multiword_inline(&mut self, n_words: usize) {
+        self.emit("@LCL"); self.emit("D=M"); self.emit("@R13"); self.emit("M=D");
+        self.emit("@5"); self.emit("A=D-A"); self.emit("D=M"); self.emit("@R14"); self.emit("M=D");
+        self.emit("@R13"); self.emit("D=M-1"); self.emit("A=D"); self.emit("D=M"); self.emit("@R12"); self.emit("M=D");
+        self.emit("@R13"); self.emit("D=M"); self.emit("@2"); self.emit("A=D-A"); self.emit("D=M"); self.emit("@R11"); self.emit("M=D");
+        self.emit("@R13"); self.emit("D=M"); self.emit("@3"); self.emit("A=D-A"); self.emit("D=M"); self.emit("@R10"); self.emit("M=D");
+        self.emit("@R13"); self.emit("D=M"); self.emit("@4"); self.emit("A=D-A"); self.emit("D=M"); self.emit("@R9"); self.emit("M=D");
+        for i in (0..n_words).rev() {
+            self.pop_d();
+            self.emit("@R15"); self.emit("M=D");
+            self.emit("@ARG"); self.emit("D=M");
+            if i > 0 {
+                self.emit(&format!("@{}", i));
+                self.emit("D=D+A");
+            }
+            self.emit("@R8"); self.emit("M=D");
+            self.emit("@R15"); self.emit("D=M");
+            self.emit("@R8"); self.emit("A=M"); self.emit("M=D");
+        }
+        self.emit("@ARG"); self.emit("D=M");
+        if n_words > 0 {
+            self.emit(&format!("@{}", n_words));
+            self.emit("D=D+A");
+        }
+        self.emit("@SP"); self.emit("M=D");
+        self.emit("@R12"); self.emit("D=M"); self.emit("@THAT"); self.emit("M=D");
+        self.emit("@R11"); self.emit("D=M"); self.emit("@THIS"); self.emit("M=D");
+        self.emit("@R10"); self.emit("D=M"); self.emit("@ARG"); self.emit("M=D");
+        self.emit("@R9"); self.emit("D=M"); self.emit("@LCL"); self.emit("M=D");
+        self.emit("@R14"); self.emit("A=M"); self.emit("0;JMP");
+    }
+
     /// Store Long (R5=hi, R6=lo) to address held in D. Uses R15 as scratch.
     fn store_long_r5r6_at_addr_d(&mut self) {
         self.emit("@R15");
@@ -834,6 +911,10 @@ impl Gen {
                 })?.clone();
                 if matches!(info.ty, crate::parser::Type::Array(..)) {
                     self.addr_of_var(&info);
+                } else if matches!(info.ty, Type::Struct(_)) {
+                    self.addr_of_var(&info);
+                    self.pop_d();
+                    self.load_value_from_addr_d(&info.ty);
                 } else if matches!(info.ty, Type::Long) {
                     self.load_var_long(&info);
                 } else {
@@ -934,6 +1015,69 @@ impl Gen {
             }
 
             Expr::Index(base, idx) => {
+                if let Expr::Member(struct_base, field) = base.as_ref() {
+                    if matches!(struct_base.as_ref(), Expr::Call(..)) {
+                        if let Some(Type::Array(elem_ty, _)) = self.lvalue_type(base, vars) {
+                            let struct_ty = self.expr_type(struct_base, vars)
+                                .ok_or_else(|| CodegenError::new("cannot determine type for returned struct temporary"))?;
+                            let struct_name = match &struct_ty {
+                                Type::Struct(name) => name.clone(),
+                                _ => return Err(CodegenError::new("array member access on non-struct temporary")),
+                            };
+                            let struct_size = self.type_size(&struct_ty).max(1);
+                            let field_offset = self.field_offset(&struct_name, field)?;
+                            let stride = self.type_size(elem_ty.as_ref()).max(1);
+
+                            self.gen_expr(struct_base, vars)?;
+                            self.gen_expr(idx, vars)?;
+                            self.pop_d();
+                            if stride == 1 {
+                                self.emit("@R12");
+                                self.emit("M=D");
+                            } else {
+                                self.emit_stride_mul(stride);
+                                self.emit("@R12");
+                                self.emit("M=D");
+                            }
+                            self.emit_sp_minus_to_d(struct_size);
+                            self.emit("@R13");
+                            self.emit("M=D");
+                            self.emit("@R13");
+                            self.emit("D=M");
+                            if field_offset > 0 {
+                                self.emit(&format!("@{}", field_offset));
+                                self.emit("D=D+A");
+                            }
+                            self.emit("@R12");
+                            self.emit("D=D+M");
+                            self.emit("@R14");
+                            self.emit("M=D");
+                            if matches!(elem_ty.as_ref(), Type::Long | Type::Struct(_) | Type::Array(_, _)) {
+                                self.emit("@R13");
+                                self.emit("D=M");
+                                self.emit("@SP");
+                                self.emit("M=D");
+                                self.emit("@R14");
+                                self.emit("D=M");
+                                self.load_value_from_addr_d(elem_ty.as_ref());
+                                return Ok(());
+                            }
+                            self.emit("@R14");
+                            self.emit("A=M");
+                            self.emit("D=M");
+                            self.emit("@R15");
+                            self.emit("M=D");
+                            self.emit("@R13");
+                            self.emit("D=M");
+                            self.emit("@SP");
+                            self.emit("M=D");
+                            self.emit("@R15");
+                            self.emit("D=M");
+                            self.push_d();
+                            return Ok(());
+                        }
+                    }
+                }
                 let base_ty = self.expr_type(base, vars);
                 let stride = match &base_ty {
                     Some(Type::Array(elem_ty, _)) | Some(Type::Ptr(elem_ty)) => {
@@ -981,19 +1125,42 @@ impl Gen {
             }
 
             Expr::Member(_, _) => {
-                // Load value at field address: gen_addr gives the address, then deref
-                let field_ty = self.lvalue_type(expr, vars);
-                self.gen_addr(expr, vars)?;
-                self.pop_d();
-                // Arrays decay to pointers - return address, don't load
-                if matches!(field_ty, Some(Type::Array(_, _))) {
-                    self.push_d();
-                } else if matches!(field_ty, Some(Type::Long)) {
-                    self.load_long_from_addr_d();
-                } else {
-                    self.emit("A=D");
-                    self.emit("D=M");
-                    self.push_d();
+                if let Expr::Member(base, field) = expr {
+                    let field_ty = self.lvalue_type(expr, vars)
+                        .ok_or_else(|| CodegenError::new("cannot determine type for member access"))?;
+                    if matches!(base.as_ref(), Expr::Call(..)) && !matches!(field_ty, Type::Array(_, _)) {
+                        let base_ty = self.expr_type(base, vars)
+                            .ok_or_else(|| CodegenError::new("cannot determine type for returned struct temporary"))?;
+                        let struct_name = match &base_ty {
+                            Type::Struct(name) => name.clone(),
+                            _ => return Err(CodegenError::new("member access on non-struct temporary")),
+                        };
+                        let struct_size = self.type_size(&base_ty).max(1);
+                        let offset = self.field_offset(&struct_name, field)?;
+                        self.gen_expr(base, vars)?;
+                        self.emit_sp_minus_to_d(struct_size);
+                        self.emit("@R13");
+                        self.emit("M=D");
+                        self.emit("@R13");
+                        self.emit("D=M");
+                        if offset > 0 {
+                            self.emit(&format!("@{}", offset));
+                            self.emit("D=D+A");
+                        }
+                        self.emit("@R14");
+                        self.emit("M=D");
+                        self.emit("@R13");
+                        self.emit("D=M");
+                        self.emit("@SP");
+                        self.emit("M=D");
+                        self.emit("@R14");
+                        self.emit("D=M");
+                        self.load_value_from_addr_d(&field_ty);
+                    } else {
+                        self.gen_addr(expr, vars)?;
+                        self.pop_d();
+                        self.load_value_from_addr_d(&field_ty);
+                    }
                 }
             }
 
@@ -2605,7 +2772,13 @@ impl Gen {
                     } else {
                         let decl_ty = vars.get(name).map(|v| v.ty.clone()).unwrap_or(Type::Int);
                         self.gen_expr(init_expr, vars)?;
-                        if matches!(decl_ty, Type::Long) {
+                        if matches!(decl_ty, Type::Struct(_)) {
+                            let size = self.type_size(&decl_ty).max(1);
+                            for offset in (0..size).rev() {
+                                self.pop_d();
+                                self.store_d_at_var_offset(&info.storage, offset);
+                            }
+                        } else if matches!(decl_ty, Type::Long) {
                             let expr_ty = self.expr_type(init_expr, vars).unwrap_or(Type::Int);
                             if !matches!(expr_ty, Type::Long) {
                                 self.sign_extend_to_long();
@@ -2866,6 +3039,12 @@ impl Gen {
             self.emit("M=M+1");
         }
 
+        let struct_ret_words = if matches!(f.ret_ty, Type::Struct(_)) {
+            self.type_size(&f.ret_ty).max(1)
+        } else {
+            0
+        };
+
         // Generate body
         for stmt in &f.body {
             self.gen_stmt(stmt, &f.vars, &f.name)?;
@@ -2874,8 +3053,15 @@ impl Gen {
         // Implicit return 0 for functions that fall off the end without a return.
         // Explicit `return` statements jump directly to (func$return), bypassing this.
         if matches!(f.ret_ty, Type::Long) {
-            self.emit("D=0"); self.push_d(); // hi
-            self.emit("D=0"); self.push_d(); // lo
+            self.emit("D=0");
+            self.push_d();
+            self.emit("D=0");
+            self.push_d();
+        } else if struct_ret_words > 1 {
+            for _ in 0..struct_ret_words {
+                self.emit("D=0");
+                self.push_d();
+            }
         } else {
             self.emit("D=0");
             self.emit("@SP");
@@ -2892,11 +3078,14 @@ impl Gen {
             if matches!(f.ret_ty, Type::Long) {
                 self.emit("@__vm_return_long");
                 self.need_return_long_trampoline = true;
+                self.emit("0;JMP");
+            } else if struct_ret_words > 1 {
+                self.emit_return_multiword_inline(struct_ret_words);
             } else {
                 self.emit("@__vm_return");
                 self.need_return_trampoline = true;
+                self.emit("0;JMP");
             }
-            self.emit("0;JMP");
         } else {
             if matches!(f.ret_ty, Type::Long) {
                 // Long return inline sequence
@@ -2917,6 +3106,8 @@ impl Gen {
                 self.emit("@R13"); self.emit("AM=M-1"); self.emit("D=M"); self.emit("@ARG"); self.emit("M=D");
                 self.emit("@R13"); self.emit("AM=M-1"); self.emit("D=M"); self.emit("@LCL"); self.emit("M=D");
                 self.emit("@R14"); self.emit("A=M"); self.emit("0;JMP");
+            } else if struct_ret_words > 1 {
+                self.emit_return_multiword_inline(struct_ret_words);
             } else {
                 // Jack VM return sequence
                 // FRAME(R13) = LCL

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
-use crate::parser::{Program, FuncDef, Stmt, Expr, BinOp, UnOp, Type, StorageClass, SwitchLabel};
+use crate::parser::{Program, FuncDef, Stmt, Expr, BinOp, UnOp, Type, StorageClass, SwitchLabel, TopLevelDecl};
 
 #[derive(Debug, Error, Clone)]
 #[error("semantic error: {0}")]
@@ -125,9 +125,9 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
     // Extern-only declarations (no definition anywhere) allocate no storage.
     let mut global_map: HashMap<String, VarInfo> = HashMap::new();
     let mut globals_out: Vec<(String, Type, Option<GlobalInit>)> = Vec::new();
-    let mut seen_globals: HashMap<String, (Type, Option<GlobalInit>, bool, bool)> = HashMap::new();
-    // name -> (ty, init, has_definition, is_static)
-    for (ty, name, init_expr, sc) in &prog.globals {
+    let mut seen_globals: HashMap<String, (Type, Option<GlobalInit>, bool, bool, bool)> = HashMap::new();
+    // name -> (ty, init, has_definition, is_static, is_unsigned_int)
+    for (ty, name, init_expr, sc, is_unsigned_int) in &prog.globals {
         let is_extern_only = *sc == StorageClass::Extern;
         if is_extern_only && init_expr.is_some() {
             return Err(SemaError::new(format!("extern variable '{}' cannot have an initializer", name)));
@@ -138,6 +138,9 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
         };
         if let Some(existing) = seen_globals.get(name) {
             if &existing.0 != ty {
+                return Err(SemaError::new(format!("conflicting types for variable '{}'", name)));
+            }
+            if existing.4 != *is_unsigned_int {
                 return Err(SemaError::new(format!("conflicting types for variable '{}'", name)));
             }
             let is_static = *sc == StorageClass::Static;
@@ -156,23 +159,26 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
             }
         } else {
             let is_static = *sc == StorageClass::Static;
-            seen_globals.insert(name.clone(), (ty.clone(), init_val, !is_extern_only, is_static));
+            seen_globals.insert(name.clone(), (ty.clone(), init_val, !is_extern_only, is_static, *is_unsigned_int));
         }
     }
 
-    for (name, (ty, init_val, has_def, _)) in &seen_globals {
+    for (name, (ty, init_val, has_def, _, _)) in &seen_globals {
         let sym = format!("__g_{}", name);
         global_map.insert(name.clone(), VarInfo { ty: ty.clone(), storage: VarStorage::Global(sym.clone()) });
         if *has_def {
             globals_out.push((sym, ty.clone(), init_val.clone()));
         }
     }
+    let global_linkage: HashMap<String, bool> = seen_globals.iter()
+        .map(|(name, (_, _, _, is_static, _))| (name.clone(), *is_static))
+        .collect();
 
     // Collect string literals from all function bodies (and global inits)
     let mut string_map: HashMap<String, String> = HashMap::new();
     let mut string_literals: Vec<(String, Vec<i16>)> = Vec::new();
     let mut str_counter = 0usize;
-    for (_, _, init_expr, _) in &prog.globals {
+    for (_, _, init_expr, _, _) in &prog.globals {
         if let Some(e) = init_expr {
             collect_strings_expr(e, &mut string_map, &mut string_literals, &mut str_counter);
         }
@@ -320,24 +326,38 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
     }
 
 
-    // Build visibility map: for each function definition, track which functions
-    // were declared/defined before it (to catch undeclared function calls).
+    // Build visibility map: for each function definition, track which file-scope
+    // declarations were visible before it.
     let mut visibility: HashMap<String, HashSet<String>> = HashMap::new();
     let mut declared_so_far: HashSet<String> = HashSet::new();
-    for f in &prog.funcs {
-        if !f.is_decl {
-            // This is a definition - capture what was declared before it
-            visibility.insert(f.name.clone(), declared_so_far.clone());
+    for decl in &prog.top_level_decls {
+        match decl {
+            TopLevelDecl::Global(name) => {
+                declared_so_far.insert(name.clone());
+            }
+            TopLevelDecl::Func { name, is_definition } => {
+                if *is_definition {
+                    visibility.insert(name.clone(), declared_so_far.clone());
+                }
+                declared_so_far.insert(name.clone());
+            }
         }
-        // Add this function to the declared set (whether decl or def)
-        declared_so_far.insert(f.name.clone());
     }
 
     let mut funcs_out = Vec::new();
     for f in prog.funcs {
         if f.is_decl { continue; }
         let fname = f.name.clone();
-        let (af, static_locals) = analyze_func(f, &global_map, &struct_defs, &func_sigs, &func_params, &func_linkage, &visibility)?;
+        let (af, static_locals) = analyze_func(
+            f,
+            &global_map,
+            &struct_defs,
+            &func_sigs,
+            &func_params,
+            &func_linkage,
+            &global_linkage,
+            &visibility,
+        )?;
         // Check that all called functions were declared before this function
         // Include the function itself in the visibility set (for recursion)
         let mut visible_funcs = visibility.get(&fname).unwrap().clone();
@@ -713,9 +733,9 @@ fn check_call_arity_expr(
 fn check_scope_flow(
     params: &[(Type, String)],
     body: &[Stmt],
-    known_globals: &HashSet<String>,
     func_sigs: &HashMap<String, (Type, usize)>,
     func_linkage: &HashMap<String, bool>,
+    global_linkage: &HashMap<String, bool>,
     file_scope_visibility: &HashMap<String, HashSet<String>>,
     current_func_name: &str,
 ) -> Result<(), SemaError> {
@@ -731,7 +751,7 @@ fn check_scope_flow(
     let visible_at_file_scope = file_scope_visibility.get(current_func_name)
         .map(|s| s.clone())
         .unwrap_or_else(HashSet::new);
-    check_sf_stmts(body, &mut scope_stack, known_globals, func_sigs, func_linkage, &visible_at_file_scope, false, false)?;
+    check_sf_stmts(body, &mut scope_stack, func_sigs, func_linkage, global_linkage, &visible_at_file_scope, false, false)?;
     scope_stack.pop();
     Ok(())
 }
@@ -739,15 +759,15 @@ fn check_scope_flow(
 fn check_sf_stmts(
     stmts: &[Stmt],
     ss: &mut Vec<HashMap<String, StorageClass>>,
-    globals: &HashSet<String>,
     func_sigs: &HashMap<String, (Type, usize)>,
     func_linkage: &HashMap<String, bool>,
+    global_linkage: &HashMap<String, bool>,
     file_scope_visibility: &HashSet<String>,
     can_break: bool,
     can_continue: bool,
 ) -> Result<(), SemaError> {
     for stmt in stmts {
-        check_sf_stmt(stmt, ss, globals, func_sigs, func_linkage, file_scope_visibility, can_break, can_continue)?;
+        check_sf_stmt(stmt, ss, func_sigs, func_linkage, global_linkage, file_scope_visibility, can_break, can_continue)?;
     }
     Ok(())
 }
@@ -755,9 +775,9 @@ fn check_sf_stmts(
 fn check_sf_stmt(
     stmt: &Stmt,
     ss: &mut Vec<HashMap<String, StorageClass>>,
-    globals: &HashSet<String>,
     func_sigs: &HashMap<String, (Type, usize)>,
     func_linkage: &HashMap<String, bool>,
+    global_linkage: &HashMap<String, bool>,
     file_scope_visibility: &HashSet<String>,
     can_break: bool,
     can_continue: bool,
@@ -774,44 +794,54 @@ fn check_sf_stmt(
             } else {
                 ss.last_mut().unwrap().insert(name.clone(), sc.clone());
             }
+            if *sc == StorageClass::Extern {
+                if func_linkage.contains_key(name) {
+                    return Err(SemaError::new(format!("'{}' redeclared as different kind of symbol", name)));
+                }
+                if let Some(&is_static) = global_linkage.get(name) {
+                    if is_static && !file_scope_visibility.contains(name) {
+                        return Err(SemaError::new(format!("conflicting linkage for variable '{}'", name)));
+                    }
+                }
+            }
             // Variables CAN shadow functions from outer scopes (that's legal in C)
             // So we don't reject based on sf_ident_in_scope here
             if let Some(e) = init {
-                check_sf_expr(e, ss, globals, func_sigs)?;
+                check_sf_expr(e, ss, global_linkage, func_sigs, file_scope_visibility)?;
             }
         }
         Stmt::Block(stmts) => {
             ss.push(HashMap::new());
-            check_sf_stmts(stmts, ss, globals, func_sigs, func_linkage, file_scope_visibility, can_break, can_continue)?;
+            check_sf_stmts(stmts, ss, func_sigs, func_linkage, global_linkage, file_scope_visibility, can_break, can_continue)?;
             ss.pop();
         }
         Stmt::If(cond, then, els) => {
-            check_sf_expr(cond, ss, globals, func_sigs)?;
-            check_sf_stmt(then, ss, globals, func_sigs, func_linkage, file_scope_visibility, can_break, can_continue)?;
+            check_sf_expr(cond, ss, global_linkage, func_sigs, file_scope_visibility)?;
+            check_sf_stmt(then, ss, func_sigs, func_linkage, global_linkage, file_scope_visibility, can_break, can_continue)?;
             if let Some(e) = els {
-                check_sf_stmt(e, ss, globals, func_sigs, func_linkage, file_scope_visibility, can_break, can_continue)?;
+                check_sf_stmt(e, ss, func_sigs, func_linkage, global_linkage, file_scope_visibility, can_break, can_continue)?;
             }
         }
         Stmt::While(cond, body) => {
-            check_sf_expr(cond, ss, globals, func_sigs)?;
-            check_sf_stmt(body, ss, globals, func_sigs, func_linkage, file_scope_visibility, true, true)?;
+            check_sf_expr(cond, ss, global_linkage, func_sigs, file_scope_visibility)?;
+            check_sf_stmt(body, ss, func_sigs, func_linkage, global_linkage, file_scope_visibility, true, true)?;
         }
         Stmt::DoWhile(body, cond) => {
-            check_sf_stmt(body, ss, globals, func_sigs, func_linkage, file_scope_visibility, true, true)?;
-            check_sf_expr(cond, ss, globals, func_sigs)?;
+            check_sf_stmt(body, ss, func_sigs, func_linkage, global_linkage, file_scope_visibility, true, true)?;
+            check_sf_expr(cond, ss, global_linkage, func_sigs, file_scope_visibility)?;
         }
         Stmt::For { init, cond, incr, body } => {
             ss.push(HashMap::new());
-            if let Some(s) = init { check_sf_stmt(s, ss, globals, func_sigs, func_linkage, file_scope_visibility, false, false)?; }
-            if let Some(e) = cond { check_sf_expr(e, ss, globals, func_sigs)?; }
-            if let Some(e) = incr { check_sf_expr(e, ss, globals, func_sigs)?; }
-            check_sf_stmt(body, ss, globals, func_sigs, func_linkage, file_scope_visibility, true, true)?;
+            if let Some(s) = init { check_sf_stmt(s, ss, func_sigs, func_linkage, global_linkage, file_scope_visibility, false, false)?; }
+            if let Some(e) = cond { check_sf_expr(e, ss, global_linkage, func_sigs, file_scope_visibility)?; }
+            if let Some(e) = incr { check_sf_expr(e, ss, global_linkage, func_sigs, file_scope_visibility)?; }
+            check_sf_stmt(body, ss, func_sigs, func_linkage, global_linkage, file_scope_visibility, true, true)?;
             ss.pop();
         }
         Stmt::Return(e) => {
-            if let Some(e) = e { check_sf_expr(e, ss, globals, func_sigs)?; }
+            if let Some(e) = e { check_sf_expr(e, ss, global_linkage, func_sigs, file_scope_visibility)?; }
         }
-        Stmt::Expr(e) => check_sf_expr(e, ss, globals, func_sigs)?,
+        Stmt::Expr(e) => check_sf_expr(e, ss, global_linkage, func_sigs, file_scope_visibility)?,
         Stmt::Break => {
             if !can_break {
                 return Err(SemaError::new("break statement not in a loop or switch"));
@@ -824,17 +854,17 @@ fn check_sf_stmt(
         }
         Stmt::Goto(_) => {}
         Stmt::Label(_, inner) => {
-            check_sf_stmt(inner, ss, globals, func_sigs, func_linkage, file_scope_visibility, can_break, can_continue)?;
+            check_sf_stmt(inner, ss, func_sigs, func_linkage, global_linkage, file_scope_visibility, can_break, can_continue)?;
         }
         Stmt::Switch { expr, arms } => {
-            check_sf_expr(expr, ss, globals, func_sigs)?;
+            check_sf_expr(expr, ss, global_linkage, func_sigs, file_scope_visibility)?;
             ss.push(HashMap::new());
             for arm in arms {
-                check_sf_stmts(&arm.stmts, ss, globals, func_sigs, func_linkage, file_scope_visibility, true, can_continue)?;
+                check_sf_stmts(&arm.stmts, ss, func_sigs, func_linkage, global_linkage, file_scope_visibility, true, can_continue)?;
             }
             ss.pop();
         }
-        Stmt::Source(_, inner) => check_sf_stmt(inner, ss, globals, func_sigs, func_linkage, file_scope_visibility, can_break, can_continue)?,
+        Stmt::Source(_, inner) => check_sf_stmt(inner, ss, func_sigs, func_linkage, global_linkage, file_scope_visibility, can_break, can_continue)?,
         Stmt::FuncDecl(name, _ret_ty, _param_types, has_external_linkage) => {
             // Check for conflict with local variables in the current scope
             if let Some(prev_sc) = ss.last().unwrap().get(name) {
@@ -842,6 +872,9 @@ fn check_sf_stmt(
                 if *prev_sc != StorageClass::Extern {
                     return Err(SemaError::new(format!("'{}' redeclared as different kind of symbol", name)));
                 }
+            }
+            if global_linkage.contains_key(name) {
+                return Err(SemaError::new(format!("'{}' redeclared as different kind of symbol", name)));
             }
             // Function declarations CAN shadow variables from outer scopes (that's legal in C)
             
@@ -885,12 +918,15 @@ fn sf_ident_in_scope(name: &str, ss: &[HashMap<String, StorageClass>]) -> bool {
 fn check_sf_expr(
     expr: &Expr,
     ss: &[HashMap<String, StorageClass>],
-    globals: &HashSet<String>,
+    global_linkage: &HashMap<String, bool>,
     func_sigs: &HashMap<String, (Type, usize)>,
+    file_scope_visibility: &HashSet<String>,
 ) -> Result<(), SemaError> {
     match expr {
         Expr::Ident(name) => {
-            if !sf_ident_in_scope(name, ss) && !globals.contains(name) {
+            if !sf_ident_in_scope(name, ss)
+                && !(global_linkage.contains_key(name) && file_scope_visibility.contains(name))
+            {
                 return Err(SemaError::new(format!("undeclared identifier '{}'", name)));
             }
         }
@@ -902,31 +938,34 @@ fn check_sf_expr(
                 if *sc != StorageClass::Extern {
                     return Err(SemaError::new(format!("'{}' is not a function", name)));
                 }
-            } else if !func_sigs.contains_key(name) && (sf_ident_in_scope(name, ss) || globals.contains(name)) {
+            } else if !func_sigs.contains_key(name)
+                && (sf_ident_in_scope(name, ss)
+                    || (global_linkage.contains_key(name) && file_scope_visibility.contains(name)))
+            {
                 // Not in func_sigs, but IS a variable in some scope - reject
                 return Err(SemaError::new(format!("'{}' is not a function", name)));
             }
-            for a in args { check_sf_expr(a, ss, globals, func_sigs)?; }
+            for a in args { check_sf_expr(a, ss, global_linkage, func_sigs, file_scope_visibility)?; }
         }
         Expr::BinOp(_, l, r) => {
-            check_sf_expr(l, ss, globals, func_sigs)?;
-            check_sf_expr(r, ss, globals, func_sigs)?;
+            check_sf_expr(l, ss, global_linkage, func_sigs, file_scope_visibility)?;
+            check_sf_expr(r, ss, global_linkage, func_sigs, file_scope_visibility)?;
         }
-        Expr::UnOp(_, e) => check_sf_expr(e, ss, globals, func_sigs)?,
+        Expr::UnOp(_, e) => check_sf_expr(e, ss, global_linkage, func_sigs, file_scope_visibility)?,
         Expr::Index(a, b) => {
-            check_sf_expr(a, ss, globals, func_sigs)?;
-            check_sf_expr(b, ss, globals, func_sigs)?;
+            check_sf_expr(a, ss, global_linkage, func_sigs, file_scope_visibility)?;
+            check_sf_expr(b, ss, global_linkage, func_sigs, file_scope_visibility)?;
         }
-        Expr::Member(base, _) => check_sf_expr(base, ss, globals, func_sigs)?,
+        Expr::Member(base, _) => check_sf_expr(base, ss, global_linkage, func_sigs, file_scope_visibility)?,
         Expr::Ternary(c, t, e) => {
-            check_sf_expr(c, ss, globals, func_sigs)?;
-            check_sf_expr(t, ss, globals, func_sigs)?;
-            check_sf_expr(e, ss, globals, func_sigs)?;
+            check_sf_expr(c, ss, global_linkage, func_sigs, file_scope_visibility)?;
+            check_sf_expr(t, ss, global_linkage, func_sigs, file_scope_visibility)?;
+            check_sf_expr(e, ss, global_linkage, func_sigs, file_scope_visibility)?;
         }
-        Expr::Cast(_, e) => check_sf_expr(e, ss, globals, func_sigs)?,
-        Expr::PostInc(e) | Expr::PostDec(e) | Expr::SizeofExpr(e) => check_sf_expr(e, ss, globals, func_sigs)?,
+        Expr::Cast(_, e) => check_sf_expr(e, ss, global_linkage, func_sigs, file_scope_visibility)?,
+        Expr::PostInc(e) | Expr::PostDec(e) | Expr::SizeofExpr(e) => check_sf_expr(e, ss, global_linkage, func_sigs, file_scope_visibility)?,
         Expr::InitList(items) => {
-            for item in items { check_sf_expr(item, ss, globals, func_sigs)?; }
+            for item in items { check_sf_expr(item, ss, global_linkage, func_sigs, file_scope_visibility)?; }
         }
         Expr::Num(_) | Expr::StringLit(_) | Expr::Sizeof(_) => {}
     }
@@ -1734,13 +1773,10 @@ fn analyze_func(
     func_sigs: &HashMap<String, (Type, usize)>,
     func_params: &HashMap<String, Vec<Type>>,
     func_linkage: &HashMap<String, bool>,
+    global_linkage: &HashMap<String, bool>,
     file_scope_visibility: &HashMap<String, HashSet<String>>,
 ) -> Result<(AnnotatedFunc, Vec<(String, Type, Option<GlobalInit>)>), SemaError> {
-    let known_globals: HashSet<String> = globals.keys()
-        .chain(func_sigs.keys())
-        .cloned()
-        .collect();
-    check_scope_flow(&f.params, &f.body, &known_globals, func_sigs, func_linkage, file_scope_visibility, &f.name)?;
+    check_scope_flow(&f.params, &f.body, func_sigs, func_linkage, global_linkage, file_scope_visibility, &f.name)?;
     check_labels_gotos(&f.body)?;
     check_duplicate_cases(&f.body)?;
 

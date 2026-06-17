@@ -148,10 +148,17 @@ pub struct FuncDef {
 }
 
 #[derive(Debug, Clone)]
+pub enum TopLevelDecl {
+    Global(String),
+    Func { name: String, is_definition: bool },
+}
+
+#[derive(Debug, Clone)]
 pub struct Program {
     pub struct_defs: Vec<StructDef>,
-    pub globals: Vec<(Type, String, Option<Expr>, StorageClass)>,
+    pub globals: Vec<(Type, String, Option<Expr>, StorageClass, bool)>,
     pub funcs: Vec<FuncDef>,
+    pub top_level_decls: Vec<TopLevelDecl>,
 }
 
 // ── Parser ───────────────────────────────────────────────────────────────────
@@ -164,6 +171,8 @@ struct Parser {
     enum_map: HashMap<String, i32>,
     /// Set by `parse_base_type` when it consumes a storage-class keyword.
     cur_storage_class: StorageClass,
+    /// Tracks whether the current int-like declaration used the `unsigned` qualifier.
+    cur_is_unsigned_int: bool,
     in_for_init: bool,
 }
 
@@ -176,6 +185,7 @@ impl Parser {
             typedef_map: HashMap::new(),
             enum_map: HashMap::new(),
             cur_storage_class: StorageClass::None,
+            cur_is_unsigned_int: false,
             in_for_init: false,
         }
     }
@@ -265,6 +275,7 @@ impl Parser {
             }
             TokenKind::KwUnsigned | TokenKind::KwSigned => {
                 let is_unsigned = *self.peek() == TokenKind::KwUnsigned;
+                self.cur_is_unsigned_int = is_unsigned;
                 self.advance();
                 // Consume any storage-class keywords that appear after signed/unsigned
                 loop {
@@ -379,6 +390,11 @@ impl Parser {
                     self.advance();
                 }
                 TokenKind::KwSigned | TokenKind::KwUnsigned | TokenKind::KwConst => {
+                    if matches!(self.peek(), TokenKind::KwUnsigned) {
+                        self.cur_is_unsigned_int = true;
+                    } else if matches!(self.peek(), TokenKind::KwSigned) {
+                        self.cur_is_unsigned_int = false;
+                    }
                     self.advance(); // consume as no-op qualifier
                 }
                 _ => break,
@@ -426,6 +442,7 @@ impl Parser {
     fn parse_program(&mut self) -> Result<Program, ParseError> {
         let mut globals = Vec::new();
         let mut funcs = Vec::new();
+        let mut top_level_decls = Vec::new();
 
         while *self.peek() != TokenKind::Eof {
             if *self.peek() == TokenKind::KwTypedef {
@@ -454,12 +471,28 @@ impl Parser {
                 continue;
             }
 
+            // Standalone incomplete struct tag declaration: struct Name;
+            if *self.peek() == TokenKind::KwStruct
+                && matches!(self.peek_at(1), TokenKind::Ident(_))
+                && *self.peek_at(2) == TokenKind::Semicolon
+            {
+                self.advance();
+                self.expect_ident()?;
+                self.expect(&TokenKind::Semicolon)?;
+                continue;
+            }
+
             let (ty, name) = self.parse_typed_decl()?;
             let sc = std::mem::replace(&mut self.cur_storage_class, StorageClass::None);
+            let is_unsigned_int = std::mem::replace(&mut self.cur_is_unsigned_int, false);
 
             if *self.peek() == TokenKind::LParen {
                 let mut func = self.parse_func_rest(ty, name)?;
                 func.is_static = sc == StorageClass::Static;
+                top_level_decls.push(TopLevelDecl::Func {
+                    name: func.name.clone(),
+                    is_definition: !func.is_decl,
+                });
                 funcs.push(func);
             } else {
                 let init = if self.eat(&TokenKind::Assign) {
@@ -472,11 +505,12 @@ impl Parser {
                     None
                 };
                 self.expect(&TokenKind::Semicolon)?;
-                globals.push((ty, name, init, sc));
+                top_level_decls.push(TopLevelDecl::Global(name.clone()));
+                globals.push((ty, name, init, sc, is_unsigned_int));
             }
         }
         let struct_defs = std::mem::take(&mut self.struct_defs);
-        Ok(Program { struct_defs, globals, funcs })
+        Ok(Program { struct_defs, globals, funcs, top_level_decls })
     }
 
     /// Parse `struct Name { field; field; }` — stores into self.struct_defs.
@@ -488,6 +522,7 @@ impl Parser {
         while *self.peek() != TokenKind::RBrace && *self.peek() != TokenKind::Eof {
             let (ty, fname) = self.parse_typed_decl()?;
             let sc = std::mem::replace(&mut self.cur_storage_class, StorageClass::None);
+            self.cur_is_unsigned_int = false;
             if sc != StorageClass::None {
                 let (l, c) = self.cur_lc();
                 return Err(ParseError::new(l, c, "storage class not allowed in struct member"));
@@ -541,6 +576,7 @@ impl Parser {
                     }
                     let (ty, pname) = self.parse_typed_decl()?;
                     let sc = std::mem::replace(&mut self.cur_storage_class, StorageClass::None);
+                    self.cur_is_unsigned_int = false;
                     if sc != StorageClass::None {
                         let (l, c) = self.cur_lc();
                         return Err(ParseError::new(l, c, "storage class not allowed in parameter declaration"));
@@ -759,8 +795,10 @@ impl Parser {
             return Ok(Stmt::Block(vec![]));
         }
         self.cur_storage_class = StorageClass::None;
+        self.cur_is_unsigned_int = false;
         let (ty, name) = self.parse_typed_decl()?;
         let sc = std::mem::replace(&mut self.cur_storage_class, StorageClass::None);
+        self.cur_is_unsigned_int = false;
         if self.in_for_init && matches!(sc, StorageClass::Static | StorageClass::Extern) {
             let (l, c) = self.cur_lc();
             return Err(ParseError::new(l, c, "storage class not allowed in for-loop initializer"));
