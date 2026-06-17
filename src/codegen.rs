@@ -226,13 +226,6 @@ impl Gen {
         self.emit("D=M");
     }
 
-    /// Pop top of stack into R13
-    fn pop_r13(&mut self) {
-        self.pop_d();
-        self.emit("@R13");
-        self.emit("M=D");
-    }
-
     fn emit_stride_mul(&mut self, stride: usize) {
         if stride == 1 { return; }
         let id = self.label();

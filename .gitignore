@@ -1,2 +1,7 @@
 /target
 *.asm
+*.hack
+*.hackem
+*.exe
+*.obj
+tmp_*

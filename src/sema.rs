@@ -882,10 +882,6 @@ fn sf_ident_in_scope(name: &str, ss: &[HashMap<String, StorageClass>]) -> bool {
     ss.iter().rev().any(|s| s.contains_key(name))
 }
 
-fn sf_ident_in_current_scope(name: &str, ss: &[HashMap<String, StorageClass>]) -> bool {
-    ss.last().map(|s| s.contains_key(name)).unwrap_or(false)
-}
-
 fn check_sf_expr(
     expr: &Expr,
     ss: &[HashMap<String, StorageClass>],
@@ -1357,7 +1353,6 @@ fn check_types_expr(
                         return Err(SemaError::new("comparison between pointer and integer"));
                     }
                 }
-                _ => {}
             }
             check_types_expr(l, vars, func_sigs, func_params, struct_defs)?;
             check_types_expr(r, vars, func_sigs, func_params, struct_defs)?;
@@ -2149,4 +2144,3 @@ fn alpha_rename_expr(expr: &mut Expr, scopes: &[HashMap<String, String>]) {
         Expr::Num(_) | Expr::StringLit(_) | Expr::Sizeof(_) | Expr::SizeofExpr(_) => {}
     }
 }
-
