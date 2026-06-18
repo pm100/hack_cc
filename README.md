@@ -120,7 +120,7 @@ break;  continue;  return expr;
 ### Functions
 
 - Recursive calls supported.
-- Variadic functions (`...`) accepted syntactically (no `va_list` support).
+- Variadic functions (`...`) supported via `#include <stdarg.h>`.
 - Forward declarations supported.
 - Multiple source files accepted: `hack_cc file1.c file2.c` merges them before compilation.
 
@@ -200,4 +200,3 @@ cargo test
 ```
 
 The test suite runs ~165 tests: assembler unit tests, emulator unit tests, end-to-end compile+run tests, and a sample of the [nand2tetris C compiler test suite](https://github.com/nlsandler/writing-a-c-compiler-tests) (chapters 1–10).
-

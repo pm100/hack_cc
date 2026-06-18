@@ -865,6 +865,64 @@ int main() {
     assert_eq!(code, 0);
 }
 
+#[test]
+fn test_varargs_sum_ints() {
+    let src = r#"
+#include <stdarg.h>
+
+int sum_ints(int count, ...) {
+    va_list ap;
+    int total = 0;
+    int i = 0;
+    va_start(ap, count);
+    while (i < count) {
+        total = total + va_arg(ap, int);
+        i = i + 1;
+    }
+    va_end(ap);
+    return total;
+}
+
+int main(void) {
+    return sum_ints(4, 3, 5, 7, 11) == 26 ? 0 : 1;
+}
+"#;
+    let asm = compile_whole(src, "varargs_sum_ints");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn test_varargs_sum_longs() {
+    let src = r#"
+#include <stdarg.h>
+
+long sum_longs(int count, ...) {
+    va_list ap;
+    long total = 0;
+    int i = 0;
+    va_start(ap, count);
+    while (i < count) {
+        total = total + va_arg(ap, long);
+        i = i + 1;
+    }
+    va_end(ap);
+    return total;
+}
+
+int main(void) {
+    long a = 1000;
+    long b = 200;
+    long c = 30;
+    long total = sum_longs(3, a, b, c);
+    return total == 1230 ? 0 : 1;
+}
+"#;
+    let asm = compile_whole(src, "varargs_sum_longs");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 0);
+}
+
 // Logical ops on long where only hi word is nonzero (lo == 0)
 #[test]
 fn test_long_logical_hi_word_only() {
