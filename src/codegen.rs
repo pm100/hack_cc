@@ -433,7 +433,6 @@ impl Gen {
                 self.push_d();
             }
             VarStorage::Global(sym) => {
-                let sym = sym.clone();
                 self.emit(&format!("@{}", sym));
                 self.emit("D=M");
                 self.push_d(); // hi
@@ -543,7 +542,6 @@ impl Gen {
                 self.emit("M=D");
             }
             VarStorage::Global(sym) => {
-                let sym = sym.clone();
                 self.emit("@R13");
                 self.emit("D=M");
                 self.emit(&format!("@{}", sym));
@@ -899,7 +897,7 @@ impl Gen {
             Expr::StringLit(s) => {
                 let sym = self.string_map.get(s).ok_or_else(|| {
                     CodegenError::new(format!("unknown string literal {:?}", s))
-                })?.clone();
+                })?;
                 self.emit(&format!("@{}", sym));
                 self.emit("D=A");
                 self.push_d();
@@ -908,7 +906,7 @@ impl Gen {
             Expr::Ident(name) => {
                 let info = vars.get(name).ok_or_else(|| {
                     CodegenError::new(format!("undefined variable '{}'", name))
-                })?.clone();
+                })?;
                 if matches!(info.ty, crate::parser::Type::Array(..)) {
                     self.addr_of_var(&info);
                 } else if matches!(info.ty, Type::Struct(_)) {
@@ -1021,7 +1019,7 @@ impl Gen {
                             let struct_ty = self.expr_type(struct_base, vars)
                                 .ok_or_else(|| CodegenError::new("cannot determine type for returned struct temporary"))?;
                             let struct_name = match &struct_ty {
-                                Type::Struct(name) => name.clone(),
+                                Type::Struct(name) => name,
                                 _ => return Err(CodegenError::new("array member access on non-struct temporary")),
                             };
                             let struct_size = self.type_size(&struct_ty).max(1);
@@ -1132,7 +1130,7 @@ impl Gen {
                         let base_ty = self.expr_type(base, vars)
                             .ok_or_else(|| CodegenError::new("cannot determine type for returned struct temporary"))?;
                         let struct_name = match &base_ty {
-                            Type::Struct(name) => name.clone(),
+                            Type::Struct(name) => name,
                             _ => return Err(CodegenError::new("member access on non-struct temporary")),
                         };
                         let struct_size = self.type_size(&base_ty).max(1);
@@ -1354,7 +1352,7 @@ impl Gen {
             Expr::Ident(name) => {
                 let info = vars.get(name).ok_or_else(|| {
                     CodegenError::new(format!("undefined variable '{}'", name))
-                })?.clone();
+                })?;
                 self.addr_of_var(&info);
             }
             Expr::UnOp(UnOp::Deref, inner) => {
@@ -1393,7 +1391,7 @@ impl Gen {
                 let base_ty = self.expr_type(base, vars)
                     .ok_or_else(|| CodegenError::new("cannot determine type for member access"))?;
                 let struct_name = match &base_ty {
-                    Type::Struct(name) => name.clone(),
+                    Type::Struct(name) => name,
                     _ => return Err(CodegenError::new(
                         format!("member access on non-struct type {:?}", base_ty)
                     )),
@@ -2248,7 +2246,7 @@ impl Gen {
                 Expr::Ident(name) => {
                     let info = vars.get(name).ok_or_else(|| {
                         CodegenError::new(format!("undefined variable '{}'", name))
-                    })?.clone();
+                    })?;
                     self.pop_d();
                     self.emit("@R14");
                     self.emit("M=D"); // R14 = lo
@@ -2307,7 +2305,7 @@ impl Gen {
                             let base_ty = self.expr_type(base, vars)
                                 .ok_or_else(|| CodegenError::new("cannot determine type for member assignment"))?;
                             let struct_name = match &base_ty {
-                                Type::Struct(name) => name.clone(),
+                                Type::Struct(name) => name,
                                 _ => return Err(CodegenError::new(
                                     format!("member access on non-struct type {:?}", base_ty)
                                 )),
@@ -2361,7 +2359,7 @@ impl Gen {
                 self.emit("M=D");
                 let info = vars.get(name).ok_or_else(|| {
                     CodegenError::new(format!("undefined variable '{}'", name))
-                })?.clone();
+                })?;
                 self.store_var_from_r13(&info);
             }
             _ => {
@@ -2501,8 +2499,11 @@ impl Gen {
                 self.emit("@R14"); self.emit("A=M"); self.emit("M=D");
             }
             VarStorage::Global(sym) => {
-                let sym_name = if offset == 0 { sym.clone() } else { format!("{}_{}", sym, offset) };
-                self.emit(&format!("@{}", sym_name));
+                if offset == 0 {
+                    self.emit(&format!("@{}", sym));
+                } else {
+                    self.emit(&format!("@{}_{}", sym, offset));
+                }
                 self.emit("M=D");
             }
             VarStorage::Param(base) => {
@@ -2644,7 +2645,7 @@ impl Gen {
                 }
                 // Nested array with sub-initializer: recurse
                 (Type::Array(sub_elem_ty, _), Expr::InitList(sub_items)) => {
-                    let sub_ty = sub_elem_ty.as_ref().clone();
+                    let sub_ty = sub_elem_ty.as_ref();
                     self.gen_array_init(&sub_ty, sub_items, item_offset, storage, vars)?;
                 }
                 // Char array row initialized with string literal (char, signed char, or unsigned char)
@@ -2703,11 +2704,11 @@ impl Gen {
                 } else if let Some(init_expr) = init {
                     let info = vars.get(name).ok_or_else(|| {
                         CodegenError::new(format!("undefined local '{}'", name))
-                    })?.clone();
+                    })?;
                     // Special case: char arr[N] = "string literal" — copy bytes into slots.
-                    if let (Expr::StringLit(s), Type::Array(_, arr_len)) = (init_expr, info.ty.clone()) {
+                    if let (Expr::StringLit(s), Type::Array(_, arr_len)) = (init_expr, &info.ty) {
                         let bytes: Vec<i16> = s.bytes().map(|b| b as i16).chain(std::iter::once(0)).collect();
-                        let n = arr_len.min(bytes.len());
+                        let n = (*arr_len).min(bytes.len());
                         for i in 0..n {
                             let ch = bytes[i];
                             if ch == 0 {
@@ -2736,12 +2737,11 @@ impl Gen {
                                     self.emit("M=D");
                                 }
                                 VarStorage::Global(sym) => {
-                                    let elem_sym = if i == 0 {
-                                        sym.clone()
+                                    if i == 0 {
+                                        self.emit(&format!("@{}", sym));
                                     } else {
-                                        format!("{}_{}", sym, i)
-                                    };
-                                    self.emit(&format!("@{}", elem_sym));
+                                        self.emit(&format!("@{}_{}", sym, i));
+                                    }
                                     self.emit("M=D");
                                 }
                                 VarStorage::Param(base) => {
@@ -2764,16 +2764,15 @@ impl Gen {
                         }
                     } else if let Expr::InitList(items) = init_expr {
                         let elem_ty = match &info.ty {
-                            Type::Array(inner, _) => inner.as_ref().clone(),
-                            ty => ty.clone(),
+                            Type::Array(inner, _) => inner.as_ref(),
+                            ty => ty,
                         };
-                        let storage = info.storage.clone();
-                        self.gen_array_init(&elem_ty, items, 0, &storage, vars)?;
+                        self.gen_array_init(elem_ty, items, 0, &info.storage, vars)?;
                     } else {
-                        let decl_ty = vars.get(name).map(|v| v.ty.clone()).unwrap_or(Type::Int);
+                        let decl_ty = &info.ty;
                         self.gen_expr(init_expr, vars)?;
                         if matches!(decl_ty, Type::Struct(_)) {
-                            let size = self.type_size(&decl_ty).max(1);
+                            let size = self.type_size(decl_ty).max(1);
                             for offset in (0..size).rev() {
                                 self.pop_d();
                                 self.store_d_at_var_offset(&info.storage, offset);
@@ -2993,7 +2992,7 @@ impl Gen {
                 self.gen_stmt(stmt, vars, func_name)?;
             }
             Stmt::Source(line, inner) => {
-                if let Some(ref file) = self.source_file.clone() {
+                if let Some(ref file) = self.source_file {
                     self.emit(&format!(".dbg {}:{}", file, line));
                 }
                 self.gen_stmt(inner, vars, func_name)?;
@@ -3024,7 +3023,7 @@ impl Gen {
         // Emit a .dbg annotation at the function entry point so that the prolog
         // (local-init code) is attributed to the function's first source line rather
         // than falling back to whatever preceded this function in the source map.
-        if let Some(ref file) = self.source_file.clone() {
+        if let Some(ref file) = self.source_file {
             if let Some(first_line) = Self::first_source_line(&f.body) {
                 self.emit(&format!(".dbg {}:{}", file, first_line));
             }
@@ -3373,7 +3372,7 @@ fn generate_inner(sema: SemaResult, body_only: bool, source_file: Option<String>
     // entry point, so seed the BFS with all defined functions.
     // In whole-program mode, start only from main.
     let seeds: Vec<String> = if body_only {
-        func_names.iter().cloned().collect()
+        func_names.into_iter().collect()
     } else {
         vec!["main".to_string()]
     };
@@ -3412,8 +3411,11 @@ fn generate_inner(sema: SemaResult, body_only: bool, source_file: Option<String>
         for (sym_prefix, chars) in &sema.string_literals {
             let n = chars.len();
             for (i, &ch) in chars.iter().enumerate() {
-                let sym = if i == 0 { sym_prefix.clone() } else { format!("{}_{}", sym_prefix, i) };
-                emit_init_value(&mut g, ch, &sym);
+                if i == 0 {
+                    emit_init_value(&mut g, ch, sym_prefix);
+                } else {
+                    emit_init_value(&mut g, ch, &format!("{}_{}", sym_prefix, i));
+                }
             }
             // Null terminator (always zero — just allocate the slot)
             g.emit(&format!("@{}_{}", sym_prefix, n));
@@ -3424,8 +3426,11 @@ fn generate_inner(sema: SemaResult, body_only: bool, source_file: Option<String>
             let size = type_size(ty, &sema.struct_defs).max(1);
             if size > 1 {
                 for i in 0..size {
-                    let elem_sym = if i == 0 { sym.clone() } else { format!("{}_{}", sym, i) };
-                    g.emit(&format!("@{}", elem_sym));
+                    if i == 0 {
+                        g.emit(&format!("@{}", sym));
+                    } else {
+                        g.emit(&format!("@{}_{}", sym, i));
+                    }
                 }
             }
         }
@@ -3440,8 +3445,11 @@ fn generate_inner(sema: SemaResult, body_only: bool, source_file: Option<String>
                 Some(GlobalInit::Array(vals)) => {
                     for (i, &val) in vals.iter().enumerate() {
                         if val != 0 {
-                            let elem_sym = if i == 0 { sym.clone() } else { format!("{}_{}", sym, i) };
-                            emit_init_value(&mut g, val as i16, &elem_sym);
+                            if i == 0 {
+                                emit_init_value(&mut g, val as i16, sym);
+                            } else {
+                                emit_init_value(&mut g, val as i16, &format!("{}_{}", sym, i));
+                            }
                         }
                     }
                 }

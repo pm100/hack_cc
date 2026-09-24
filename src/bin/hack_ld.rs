@@ -113,11 +113,11 @@ fn main() {
     let lib_dirs = if cli.lib_dirs.is_empty() {
         default_lib_dirs()
     } else {
-        cli.lib_dirs.clone()
+        cli.lib_dirs
     };
 
     // ── Determine output format early (affects how font table is handled) ────
-    let fmt_enum = cli.format.clone().or_else(|| {
+    let fmt_enum = cli.format.or_else(|| {
         cli.output.as_ref().and_then(|p| {
             match p.extension().and_then(|e| e.to_str()) {
                 Some("hackem") => Some(Format::Hackem),
@@ -166,12 +166,11 @@ fn main() {
     };
 
     let build_combined = |extra_init: &str| -> String {
-        let full_init = if extra_init.is_empty() {
-            init_code.clone()
+        let bootstrap = if extra_init.is_empty() {
+            gen_bootstrap(&init_code, sp_base)
         } else {
-            format!("{}\n{}", extra_init, init_code)
+            gen_bootstrap(&format!("{}\n{}", extra_init, init_code), sp_base)
         };
-        let bootstrap = gen_bootstrap(&full_init, sp_base);
         let mut combined = bootstrap;
         for (name, sf) in input_names.iter().zip(parsed.iter()) {
             combined.push('\n');

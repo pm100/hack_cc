@@ -180,7 +180,7 @@ fn assemble_with_var_base(src: &str, var_base: i16) -> Result<Vec<Instr>, String
             let (dest, rest) = if let Some(pos) = line.find('=') {
                 (line[..pos].to_string(), line[pos + 1..].to_string())
             } else {
-                (String::new(), line.clone())
+                (String::new(), line)
             };
             let (comp, jump) = if let Some(pos) = rest.find(';') {
                 (rest[..pos].to_string(), rest[pos + 1..].to_string())

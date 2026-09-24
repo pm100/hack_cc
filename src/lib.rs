@@ -242,8 +242,11 @@ fn build_object_text(
     for (sym_prefix, chars) in string_literals {
         let n = chars.len();
         for (i, &ch) in chars.iter().enumerate() {
-            let sym = if i == 0 { sym_prefix.clone() } else { format!("{}_{}", sym_prefix, i) };
-            out.push_str(&format!(".data {} {}\n", sym, ch));
+            if i == 0 {
+                out.push_str(&format!(".data {} {}\n", sym_prefix, ch));
+            } else {
+                out.push_str(&format!(".data {}_{} {}\n", sym_prefix, i, ch));
+            }
         }
         out.push_str(&format!(".data {}_{} 0\n", sym_prefix, n));
     }
@@ -252,7 +255,6 @@ fn build_object_text(
         let size = sema::type_size(ty, struct_defs).max(1);
         if size > 1 {
             for i in 0..size {
-                let elem_sym = if i == 0 { sym.clone() } else { format!("{}_{}", sym, i) };
                 let val: i16 = match (init_val, ty) {
                     (Some(sema::GlobalInit::Array(vals)), _) => {
                         vals.get(i).copied().unwrap_or(0) as i16
@@ -263,7 +265,11 @@ fn build_object_text(
                     }
                     _ => 0,
                 };
-                out.push_str(&format!(".data {} {}\n", elem_sym, val));
+                if i == 0 {
+                    out.push_str(&format!(".data {} {}\n", sym, val));
+                } else {
+                    out.push_str(&format!(".data {}_{} {}\n", sym, i, val));
+                }
             }
         }
     }

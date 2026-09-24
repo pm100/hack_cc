@@ -72,7 +72,7 @@ fn main() {
             }
         }
         let c_opts = hack_cc::CompileOptions {
-            include_dirs: cli.include_dirs.clone(),
+            include_dirs: cli.include_dirs,
             defines: c_defines,
             lib_dirs: Vec::new(), // not needed for object compilation
             debug: cli.debug,
@@ -141,10 +141,10 @@ fn main() {
     let lib_dirs = if cli.lib_dirs.is_empty() {
         hack_cc::linker::default_lib_dirs()
     } else {
-        cli.lib_dirs.clone()
+        cli.lib_dirs
     };
     let opts = CompileOptions {
-        include_dirs: cli.include_dirs.clone(),
+        include_dirs: cli.include_dirs,
         defines,
         lib_dirs,
         debug: cli.debug,
@@ -210,4 +210,3 @@ fn main() {
         eprintln!("wrote map {:?}", map_path);
     }
 }
-

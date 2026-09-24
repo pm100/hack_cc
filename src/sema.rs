@@ -361,7 +361,7 @@ fn analyze_impl(prog: Program, user_externals: &[&str]) -> Result<SemaResult, Se
         // Check that all called functions were declared before this function
         // Include the function itself in the visibility set (for recursion)
         let mut visible_funcs = visibility.get(&fname).unwrap().clone();
-        visible_funcs.insert(fname.clone());
+        visible_funcs.insert(fname);
         check_calls_defined_ext(&af.body, &visible_funcs, &[], user_externals)?;
         check_call_arity(&af.body, &func_sigs, &func_variadic)?;
         globals_out.extend(static_locals);
