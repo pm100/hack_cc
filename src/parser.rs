@@ -794,6 +794,14 @@ impl Parser {
             self.typedef_map.insert(name, ty);
             return Ok(Stmt::Block(vec![]));
         }
+        // Handle local enum definitions: `enum Name { A, B };`
+        if *self.peek() == TokenKind::KwEnum
+            && matches!(self.peek_at(1), TokenKind::Ident(_))
+            && *self.peek_at(2) == TokenKind::LBrace
+        {
+            self.parse_enum_def()?;
+            return Ok(Stmt::Block(vec![]));
+        }
         self.cur_storage_class = StorageClass::None;
         self.cur_is_unsigned_int = false;
         let (ty, name) = self.parse_typed_decl()?;

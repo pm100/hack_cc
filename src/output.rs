@@ -32,11 +32,21 @@ pub struct EmitResult {
 
 /// Convert a compiled program to the requested output format.
 pub fn emit(prog: &CompiledProgram, format: OutputFormat) -> Result<EmitResult, String> {
+    emit_with_tst_hack_name(prog, format, None)
+}
+
+/// Convert a compiled program to the requested output format, optionally
+/// specifying the `.hack` file name used by generated `.tst` scripts.
+pub fn emit_with_tst_hack_name(
+    prog: &CompiledProgram,
+    format: OutputFormat,
+    tst_hack_name: Option<&str>,
+) -> Result<EmitResult, String> {
     match format {
         OutputFormat::Asm    => emit_asm(prog),
         OutputFormat::Hackem => emit_hackem(prog),
         OutputFormat::Hack   => emit_hack(prog),
-        OutputFormat::Tst    => emit_tst(prog),
+        OutputFormat::Tst    => emit_tst(prog, tst_hack_name.unwrap_or("prog.hack")),
     }
 }
 
@@ -71,7 +81,7 @@ fn emit_hackem(prog: &CompiledProgram) -> Result<EmitResult, String> {
     Ok(EmitResult { main: out, hack_companion: None })
 }
 
-fn emit_tst(prog: &CompiledProgram) -> Result<EmitResult, String> {
+fn emit_tst(prog: &CompiledProgram, hack_name: &str) -> Result<EmitResult, String> {
     // The .hack companion: full program (init code is inline in bootstrap)
     let words = assembler::assemble_with_base(&prog.asm, 16).map_err(|e| e.to_string())?;
     let binary = words_to_binary_strings(&words);
@@ -79,7 +89,7 @@ fn emit_tst(prog: &CompiledProgram) -> Result<EmitResult, String> {
     // Build the .tst script
     let mut tst = String::new();
     tst.push_str("// Auto-generated nand2tetris test script\n");
-    tst.push_str("load prog.hack,\n");
+    tst.push_str(&format!("load {},\n", hack_name));
     tst.push_str("output-file prog.out,\n");
     tst.push_str("output-list RAM[0]%D1.6.1;\n\n");
 
@@ -99,7 +109,7 @@ fn emit_tst(prog: &CompiledProgram) -> Result<EmitResult, String> {
     }
 
     tst.push_str("set PC 0,\n\n");
-    tst.push_str("repeat 100000 {\n");
+    tst.push_str("repeat 1000000000000 {\n");
     tst.push_str("  ticktock;\n");
     tst.push_str("}\n\n");
     tst.push_str("output;\n");

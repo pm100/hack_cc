@@ -1992,15 +1992,14 @@ int main() {
     #[test]
     fn test_load_tst_format_and_run() {
         use hack_cc::compile;
-        use hack_cc::output::{OutputFormat, emit};
+        use hack_cc::output::{OutputFormat, emit_with_tst_hack_name};
         use std::fs;
         let prog = compile("int main() { return 7; }").unwrap();
-        let result = emit(&prog, OutputFormat::Tst).unwrap();
+        let result = emit_with_tst_hack_name(&prog, OutputFormat::Tst, Some("test_prog.hack")).unwrap();
         // Write companion .hack to a temp file so load_tst can find it
         let dir = std::env::temp_dir().join("hack_cc_tst_test");
         fs::create_dir_all(&dir).unwrap();
-        // The .tst says "load prog.hack," so companion must be prog.hack
-        let hack_path = dir.join("prog.hack");
+        let hack_path = dir.join("test_prog.hack");
         let tst_path = dir.join("test_prog.tst");
         fs::write(&hack_path, result.hack_companion.as_ref().unwrap()).unwrap();
         fs::write(&tst_path, &result.main).unwrap();

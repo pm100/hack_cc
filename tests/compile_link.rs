@@ -104,8 +104,7 @@ fn link_to_hack(s_files: &[&Path], name: &str) -> PathBuf {
 }
 
 /// Link `.s` files to a `.tst` output via `hack_ld`.
-/// Returns the path to the `.tst` file; the companion `prog.hack` is placed
-/// in the same directory.
+/// Returns the path to the `.tst` file; the companion `.hack` uses the same stem.
 fn link_to_tst(s_files: &[&Path], name: &str) -> PathBuf {
     let hack_ld = env!("CARGO_BIN_EXE_hack_ld");
     let out_path = tmp_dir().join(format!("{}.tst", name));
@@ -114,7 +113,6 @@ fn link_to_tst(s_files: &[&Path], name: &str) -> PathBuf {
     cmd.arg("-o").arg(&out_path);
     let status = cmd.status().unwrap_or_else(|e| panic!("failed to run hack_ld: {}", e));
     assert!(status.success(), "hack_ld failed for '{}'", name);
-    // The companion .hack binary is emitted alongside as `prog.hack`
     out_path
 }
 fn compile_whole(src: &str, name: &str) -> PathBuf {
@@ -1629,6 +1627,8 @@ fn test_format_hackem_return_value() {
 fn test_format_tst_return_value() {
     let s = compile_to_s("int main() { return 99; }", "fmt_tst_ret");
     let tst = link_to_tst(&[&s], "fmt_tst_ret");
+    let tst_src = fs::read_to_string(&tst).unwrap();
+    assert!(tst_src.contains("load fmt_tst_ret.hack,"));
     let (code, _) = run(&tst);
     assert_eq!(code, 99);
 }
@@ -1683,6 +1683,294 @@ fn test_whole_program_tst_format() {
         .args([c_path.to_str().unwrap(), "-I", INCLUDE_DIR, "-o", tst_path.to_str().unwrap()])
         .status().unwrap();
     assert!(status.success(), "hack_cc failed for wp_tst");
+    let tst_src = fs::read_to_string(&tst_path).unwrap();
+    assert!(tst_src.contains("load wp_tst.hack,"));
     let (code, _) = run(&tst_path);
     assert_eq!(code, 23);
+}
+
+// ── Type features: typedef and enum ───────────────────────────────────────────
+
+/// Test `typedef` works at file scope.
+#[test]
+fn test_typedef_file_scope() {
+    let src = r#"
+typedef int myint;
+myint global_val = 42;
+
+int main(void) {
+    return global_val == 42 ? 100 : -1;
+}
+"#;
+    let asm = compile_whole(src, "typedef_file");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 100);
+}
+
+/// Test `typedef` works inside function bodies.
+#[test]
+fn test_typedef_in_function() {
+    let src = r#"
+#include <hack.h>
+
+int main(void) {
+    typedef int myint;
+    typedef char byte;
+
+    myint x = 42;
+    byte b = 'A';
+
+    if (x != 42 || b != 65) return -1;
+
+    // Use typedef'd type in expression
+    return x + b == 107 ? 200 : -2;
+}
+"#;
+    let asm = compile_whole(src, "typedef_fn");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 200);
+}
+
+/// Test `enum` definition and constant usage in expressions.
+#[test]
+fn test_enum_basic() {
+    let src = r#"
+#include <hack.h>
+
+int main(void) {
+    enum color { RED, GREEN, BLUE };
+
+    int x = RED;      // 0
+    int y = GREEN;    // 1
+    int z = BLUE;     // 2
+
+    if (x != 0 || y != 1 || z != 2) return -1;
+
+    return x + y + z == 3 ? 50 : -2;
+}
+"#;
+    let asm = compile_whole(src, "enum_basic");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 50);
+}
+
+/// Test enum with explicit values.
+#[test]
+fn test_enum_explicit_values() {
+    let src = r#"
+#include <hack.h>
+
+int main(void) {
+    enum status {
+        UNKNOWN = -1,
+        OK = 200,
+        ERROR = 404
+    };
+
+    int s1 = UNKNOWN;   // -1
+    int s2 = OK;        // 200
+    int s3 = ERROR;     // 404
+
+    if (s1 != -1 || s2 != 200 || s3 != 404) return -1;
+
+    return OK == 200 ? 77 : -2;
+}
+"#;
+    let asm = compile_whole(src, "enum_values");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 77);
+}
+
+/// Test enum values auto-incrementing.
+#[test]
+fn test_enum_auto_increment() {
+    let src = r#"
+#include <hack.h>
+
+int main(void) {
+    enum days { MON = 1, TUE, WED, THU, FRI };
+
+    if (MON != 1 || TUE != 2 || WED != 3) return -1;
+    if (THU != 4 || FRI != 5) return -2;
+
+    // Test auto-increment from explicit value
+    enum nums { A = 10, B, C };
+    if (A != 10 || B != 11 || C != 12) return -3;
+
+    return FRI == 5 && C == 12 ? 78 : -4;
+}
+"#;
+    let asm = compile_whole(src, "enum_increment");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 78);
+}
+
+/// Test multiple enum definitions in same function.
+#[test]
+fn test_enum_multiple_defs() {
+    let src = r#"
+#include <hack.h>
+
+int main(void) {
+    enum bool { FALSE = 0, TRUE = 1 };
+    enum result { OK = 0, ERR_NOTFOUND = 1, ERR_ACCESSDENIED = 2 };
+
+    int b = TRUE;
+    int r = ERR_ACCESSDENIED;
+
+    if (b != 1 || r != 2) return -1;
+
+    // Use enum constants in arithmetic
+    return FALSE + TRUE + OK == 1 ? 79 : -2;
+}
+"#;
+    let asm = compile_whole(src, "enum_multi");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 79);
+}
+
+// ── Postfix increment/decrement semantics ─────────────────────────────────────
+
+/// Test postfix `i++` returns old value before incrementing.
+#[test]
+fn test_postfix_increment_returns_old_value() {
+    let src = r#"
+#include <hack.h>
+
+int main(void) {
+    int i = 5;
+    int x = i++;  // x should be 5, i becomes 6
+
+    if (x != 5 || i != 6) return -1;
+
+    return 100;
+}
+"#;
+    let asm = compile_whole(src, "postfix_inc");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 100);
+}
+
+/// Test postfix `i--` returns old value before decrementing.
+#[test]
+fn test_postfix_decrement_returns_old_value() {
+    let src = r#"
+#include <hack.h>
+
+int main(void) {
+    int a = 7;
+    int b = a--;  // b should be 7, a becomes 6
+
+    if (b != 7 || a != 6) return -1;
+
+    return 200;
+}
+"#;
+    let asm = compile_whole(src, "postfix_dec");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 200);
+}
+
+/// Test postfix increment in expressions.
+#[test]
+fn test_postfix_increment_in_expression() {
+    let src = r#"
+#include <hack.h>
+
+int main(void) {
+    int j = 10;
+    int k = 3;
+    int y = j++ + k;  // y should be 13 (10+3), j becomes 11
+
+    if (y != 13 || j != 11) return -1;
+
+    return 80;
+}
+"#;
+    let asm = compile_whole(src, "postfix_expr");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 80);
+}
+
+/// Test postfix decrement in expressions.
+#[test]
+fn test_postfix_decrement_in_expression() {
+    let src = r#"
+#include <hack.h>
+
+int main(void) {
+    int p = 15;
+    int q = 5;
+    int z = p-- - q;  // z should be 10 (15-5), p becomes 14
+
+    if (z != 10 || p != 14) return -1;
+
+    return 81;
+}
+"#;
+    let asm = compile_whole(src, "postfix_dec_expr");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 81);
+}
+
+/// Test postfix increment in typical for-loop pattern.
+#[test]
+fn test_postfix_in_for_loop() {
+    let src = r#"
+#include <hack.h>
+
+int main(void) {
+    int count = 0;
+    int n = 0;
+    while (n < 5) {
+        count++;
+        n++;
+    }
+
+    if (count != 5 || n != 5) return -1;
+
+    // Test with post-increment in loop body
+    int sum = 0;
+    int i = 0;
+    while (i < 3) {
+        sum = sum + i;
+        i++;
+    }
+
+    if (sum != 3) return -2;  // 0+1+2 = 3
+
+    return 82;
+}
+"#;
+    let asm = compile_whole(src, "postfix_loop");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 82);
+}
+
+/// Test both prefix and postfix in same expression context.
+#[test]
+fn test_prefix_vs_postfix_difference() {
+    let src = r#"
+#include <hack.h>
+
+int main(void) {
+    int a = 5;
+    int b = ++a;  // pre-increment: a becomes 6, b = 6
+
+    if (a != 6 || b != 6) return -1;
+
+    int c = 5;
+    int d = c++;  // post-increment: d = 5, c becomes 6
+
+    if (c != 6 || d != 5) return -2;
+
+    // Verify they differ in returned value
+    if (b == d) return -3;  // Should be different!
+
+    return 83;
+}
+"#;
+    let asm = compile_whole(src, "prefix_postfix_diff");
+    let (code, _) = run(&asm);
+    assert_eq!(code, 83);
 }

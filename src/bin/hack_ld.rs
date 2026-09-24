@@ -21,7 +21,7 @@
 use clap::Parser;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use hack_cc::output::{OutputFormat, emit};
+use hack_cc::output::{OutputFormat, emit, emit_with_tst_hack_name};
 use hack_cc::codegen::{gen_bootstrap, gen_font_init_asm, gen_font_data_inits, CompiledProgram, DataInit};
 use hack_cc::linker::{link, link_debug, default_lib_dirs};
 
@@ -232,7 +232,15 @@ fn main() {
         cli.inputs[0].with_extension(default_ext)
     });
 
-    let result = emit(&prog, fmt).unwrap_or_else(|e| {
+    let tst_hack_path = out_path.with_extension("hack");
+    let tst_hack_name = tst_hack_path
+        .file_name()
+        .and_then(|s| s.to_str());
+    let result = if fmt == OutputFormat::Tst {
+        emit_with_tst_hack_name(&prog, fmt, tst_hack_name)
+    } else {
+        emit(&prog, fmt)
+    }.unwrap_or_else(|e| {
         eprintln!("output error: {}", e);
         std::process::exit(1);
     });
