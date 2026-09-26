@@ -199,4 +199,4 @@ RAM[32767]     Output port (putchar writes here; read by hack_emu)
 cargo test
 ```
 
-The test suite runs ~165 tests: assembler unit tests, emulator unit tests, end-to-end compile+run tests, and a sample of the [nand2tetris C compiler test suite](https://github.com/nlsandler/writing-a-c-compiler-tests) (chapters 1–10).
+The test suite runs ~165 tests: assembler unit tests, emulator unit tests, end-to-end compile+run tests, and a sample of the [writing a c compiler from scratch](https://github.com/nlsandler/writing-a-c-compiler-tests) (chapters 1–10).
